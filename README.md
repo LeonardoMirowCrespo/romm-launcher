@@ -60,8 +60,16 @@ in RomM and the one it last synced:
 - Both changed since the last sync → you're asked which one to keep.
 
 Every save that gets replaced is copied to `backups/<game id>/` first (the last 20 per game
-are kept). If an upload fails, you're told, the save on your computer is left alone, and
-the upload is retried the next time you start the launcher.
+are kept). That includes RomM's copy: uploading replaces RomM's save of the same name, so
+the launcher downloads and backs up that save first, and doesn't upload if it can't. If an
+upload fails, you're told, the save on your computer is left alone, and the upload is
+retried the next time you start the launcher.
+
+## What it does on your RomM server
+
+Only reading, and uploading saves. It can't delete or change anything else: every request
+is checked before it's sent, and anything other than a read or a save upload to your RomM
+server (deleting, editing, other servers) is refused.
 
 ## Platforms
 

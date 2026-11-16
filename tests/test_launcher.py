@@ -31,8 +31,8 @@ ROMS = [
 ]
 STORE = {"saves": [], "files": {}}
 AUTH = "Basic " + base64.b64encode(b"leo:pw").decode()
-FLAGS = {"old": False, "csrf": False, "fail_upload": False}
-SEEN = {"rom_downloads": 0, "token": 0}
+FLAGS = {"old": False, "csrf": False, "fail_upload": False, "fail_save_download": False}
+SEEN = {"rom_downloads": 0, "token": 0, "destructive": 0}
 
 
 class H(BaseHTTPRequestHandler):
@@ -72,10 +72,24 @@ class H(BaseHTTPRequestHandler):
         if u.path.startswith("/api/saves/") and u.path.endswith("/content"):
             if FLAGS["old"]:
                 return self.send(404, {"detail": "x"})
+            if FLAGS["fail_save_download"]:
+                return self.send(500, {"detail": "broken"})
             return self.send(200, STORE["files"][int(u.path.split("/")[3])], "application/octet-stream")
         if u.path.startswith("/api/raw/"):
             return self.send(200, STORE["files"][int(u.path.split("/")[-1])], "application/octet-stream")
+        if u.path in ("/redirect-away", "/redirect-home"):
+            self.send_response(302)
+            host = "127.0.0.2" if u.path == "/redirect-away" else "127.0.0.1"
+            self.send_header("Location", f"http://{host}:{self.server.server_port}/api/users/me")
+            self.send_header("Content-Length", "0")
+            return self.end_headers()
         self.send(404, {"detail": "nf"})
+
+    def refuse_write(self):
+        SEEN["destructive"] += 1  # the launcher must never get here
+        self.send(405, {"detail": "not allowed"})
+
+    do_DELETE = do_PUT = do_PATCH = refuse_write
 
     def do_POST(self):
         u = urlparse(self.path)
@@ -132,6 +146,31 @@ try:
 except L.RommError as e:
     check("unreachable server -> clear error", "Can't reach" in str(e))
 check("list roms (paged response)", [r["id"] for r in c.list_roms()] == [7, 8, 9])
+
+# ---- The client can't delete or change anything on RomM -------------------
+def blocked(name, method, path, params=None, client=c):
+    try:
+        client._request(method, path, params=params)
+    except L.RommError as e:
+        return check(name, str(e).startswith("Blocked"))
+    raise SystemExit(f"FAILED: {name} (request was sent)")
+
+
+blocked("DELETE refused", "DELETE", "/api/saves/1")
+blocked("PUT refused", "PUT", "/api/roms/7")
+blocked("PATCH refused", "PATCH", "/api/users/me")
+blocked("POST to other routes refused", "POST", "/api/roms/delete")
+blocked("POST /api/saves/delete refused", "POST", "/api/saves/delete")
+blocked("upload with autocleanup refused", "POST", "/api/saves", {"rom_id": 7, "emulator": "x", "autocleanup": "true"})
+blocked("upload with overwrite refused", "POST", "/api/saves", {"rom_id": 7, "emulator": "x", "overwrite": "true"})
+blocked("other servers refused", "GET", "http://127.0.0.2:1/api/users/me")
+blocked("redirect to another server refused", "GET", "/redirect-away")
+check("redirect within RomM followed", c._json("GET", "/redirect-home")["username"] == "leo")
+check("nothing destructive reached the server", SEEN["destructive"] == 0)
+sub = L.RommClient("https://romm.example.com/romm/", "a", "b")
+sub._check("POST", "https://romm.example.com/romm/api/saves?rom_id=1&emulator=mgba")
+check("RomM under a sub-path: uploads allowed", True)
+blocked("RomM under a sub-path: DELETE refused", "DELETE", "/api/saves/1", client=sub)
 
 # ---- decide() -------------------------------------------------------------
 D = L.decide
@@ -197,6 +236,18 @@ check("local newer is kept", app.sync_before_play(oot, L.FileSave(local_save)) =
       and local_save.read_bytes() == b"C" * 296960)
 check("upload works", app.upload(oot, L.FileSave(local_save)))
 check("RomM now has it", L.fetch_remote(c, oot, L.FileSave(local_save)).data == b"C" * 296960)
+romm_backups = list((L.BACKUP_DIR / "7").glob("*romm-before-upload*"))
+check("RomM's save backed up before it was replaced", any(b.read_bytes() == b"B" * 296960 for b in romm_backups))
+
+# If RomM's current save can't be backed up, nothing is uploaded.
+saves_before = len(STORE["saves"])
+local_save.write_bytes(b"G" * 296960)
+FLAGS["fail_save_download"] = True
+check("no backup -> no upload", app.upload(oot, L.FileSave(local_save)) is False
+      and len(STORE["saves"]) == saves_before and app.state["7"]["pending_upload"] is True)
+FLAGS["fail_save_download"] = False
+local_save.write_bytes(b"C" * 296960)
+app.mark_synced(oot, L.sha256(b"C" * 296960))
 
 # RomM changed elsewhere (e.g. EmulatorJS) -> download, old local save backed up.
 c.upload_save(7, "other-name.srm", b"D" * 296960, "mupen64plus_next")
@@ -215,6 +266,43 @@ FLAGS["fail_upload"] = False
 app.retry_pending(games)
 check("pending upload retried", L.fetch_remote(c, oot, L.FileSave(local_save)).data == b"E" * 296960
       and app.state["7"]["pending_upload"] is False)
+
+# No save in RomM: say so, start the game normally, upload the save it made on close.
+# RetroArch is replaced by a stand-in that "plays" by writing a save file.
+import contextlib
+import io
+
+sm64 = [g for g in games if g.id == 8][0]
+sm64.rom_dest.parent.mkdir(parents=True, exist_ok=True)
+sm64.rom_dest.write_bytes(b"rom")
+(ra / "retroarch").write_bytes(b"")
+(ra / "cores" / f"mupen64plus_next_libretro{L.CORE_EXT}").write_bytes(b"core")
+sm64_save = sm64.save_path(sm64.rom_dest)
+launched = []
+
+
+class FakeRetroArch:
+    def __init__(self, args, **kw):
+        launched.append(args)
+        sm64_save.parent.mkdir(parents=True, exist_ok=True)
+        sm64_save.write_bytes(b"M" * 512)
+
+    def wait(self):
+        return 0
+
+
+real_popen, L.subprocess.Popen = L.subprocess.Popen, FakeRetroArch
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    app.play(sm64)
+L.subprocess.Popen = real_popen
+log = out.getvalue()
+check("no RomM save is reported", "RomM has no save for this game yet" in log)
+check("game started normally", launched and launched[0][-1] == str(sm64.rom_dest))
+check("new save uploaded on close", "Save uploaded to RomM." in log
+      and L.fetch_remote(c, sm64, L.FileSave(sm64_save)).data == b"M" * 512
+      and app.state["8"]["hash"] == L.sha256(b"M" * 512))
+sm64.rom_dest.unlink()  # later tests expect only Ocarina of Time on this computer
 
 # RomM that refuses Basic auth on writes (CSRF) -> switch to a token.
 FLAGS["csrf"] = True
@@ -441,4 +529,5 @@ off = L.Launcher()
 off.offline = True
 check("offline lists local games only", [g.id for g in off.library()] == [7])
 
+check("still nothing destructive reached the server", SEEN["destructive"] == 0)
 print("\nall tests passed")

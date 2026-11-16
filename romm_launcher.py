@@ -532,8 +532,32 @@ class LoginError(RommError):
     pass
 
 
+def _origin(url: str) -> tuple[str, str]:
+    parts = urllib.parse.urlsplit(url)
+    return parts.scheme.lower(), parts.netloc.lower()
+
+
+class _SameServerRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow redirects only within the RomM server, so the login never goes elsewhere."""
+
+    def __init__(self, origin: tuple[str, str]):
+        super().__init__()
+        self.origin = origin
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if _origin(newurl) != self.origin:
+            raise RommError(f"Blocked: RomM redirected to another server ({newurl}).")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 class RommClient:
     TOKEN_SCOPES = "me.read roms.read platforms.read assets.read assets.write"
+    # The launcher may only READ from RomM and UPLOAD saves. Every request is checked
+    # against this before it's sent (see _check), so nothing in the launcher can delete
+    # or change anything else on the server: no DELETE/PUT/PATCH, no POST except these
+    # paths, and only with these query parameters (so e.g. RomM's "autocleanup" option
+    # for uploads, which deletes older saves, can't be switched on).
+    ALLOWED_POSTS = {"/api/saves": {"rom_id", "emulator"}, "/api/token": set()}
 
     def __init__(self, base_url: str, username: str, password: str, timeout: int = 30):
         self.base = base_url.rstrip("/")
@@ -541,6 +565,7 @@ class RommClient:
         token = base64.b64encode(f"{username}:{password}".encode()).decode()
         self.auth = f"Basic {token}"
         self.timeout = timeout
+        self._opener = urllib.request.build_opener(_SameServerRedirects(_origin(self.base)))
 
     def _url(self, path: str, params: dict | None) -> str:
         url = path if path.startswith("http") else f"{self.base}{path}"
@@ -548,15 +573,34 @@ class RommClient:
             url += ("&" if "?" in url else "?") + urllib.parse.urlencode(params, doseq=True)
         return url
 
+    def _check(self, method: str, url: str) -> None:
+        """Refuse any request that isn't a read or a save upload to this RomM server."""
+        if _origin(url) != _origin(self.base):
+            raise RommError(f"Blocked: {url} is not on your RomM server ({self.base}).")
+        if method == "GET":
+            return
+        parts = urllib.parse.urlsplit(url)
+        prefix = urllib.parse.urlsplit(self.base).path.rstrip("/")
+        path = parts.path[len(prefix):] if parts.path.startswith(prefix) else parts.path
+        allowed = self.ALLOWED_POSTS.get(path) if method == "POST" else None
+        params = set(urllib.parse.parse_qs(parts.query, keep_blank_values=True))
+        if allowed is None or not params <= allowed:
+            raise RommError(
+                f"Blocked: {method} {path}{'?' + parts.query if parts.query else ''}. "
+                "The launcher is only allowed to read from RomM and upload saves."
+            )
+
     def _open(self, method, path, params=None, body=None, content_type=None, retry=True):
-        req = urllib.request.Request(self._url(path, params), data=body, method=method)
+        url = self._url(path, params)
+        self._check(method, url)
+        req = urllib.request.Request(url, data=body, method=method)
         req.add_header("Authorization", self.auth)
         req.add_header("Accept", "application/json")
         req.add_header("User-Agent", "romm-launcher")
         if content_type:
             req.add_header("Content-Type", content_type)
         try:
-            return urllib.request.urlopen(req, timeout=self.timeout)
+            return self._opener.open(req, timeout=self.timeout)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode(errors="replace")[:300]
             if exc.code == 403 and "csrf" in detail.lower() and retry and self.auth.startswith("Basic"):
@@ -570,7 +614,7 @@ class RommClient:
             raise RommError(f"RomM answered {exc.code} for {path}: {detail}") from exc
         except urllib.error.URLError as exc:
             raise RommError(
-                f"Can't reach RomM at {self.base} ({exc.reason}). Is Tailscale connected?"
+                f"Can't reach RomM at {self.base} ({exc.reason}). Is the server up, and is this computer on its network (VPN)?"
             ) from exc
         except (TimeoutError, OSError) as exc:
             raise RommError(f"RomM at {self.base} did not answer ({exc}).") from exc
@@ -584,11 +628,13 @@ class RommClient:
                 "scope": self.TOKEN_SCOPES,
             }
         ).encode()
-        req = urllib.request.Request(f"{self.base}/api/token", data=form, method="POST")
+        url = f"{self.base}/api/token"
+        self._check("POST", url)
+        req = urllib.request.Request(url, data=form, method="POST")
         req.add_header("Content-Type", "application/x-www-form-urlencoded")
         req.add_header("Accept", "application/json")
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with self._opener.open(req, timeout=self.timeout) as resp:
                 self.auth = f"Bearer {json.loads(resp.read())['access_token']}"
         except Exception as exc:
             raise RommError(f"RomM refused to issue an API token: {exc}") from exc
@@ -1372,10 +1418,12 @@ class Launcher:
             ok(f"Save from RomM ({fmt_time(remote.updated)}) → {save.location}")
         elif action == "keep" and remote.hash is None:
             ok("RomM has no save for this game yet; using the one on this computer.")
+            say(dim("It's uploaded to RomM when you close the game."))
         elif action == "keep":
             ok("The save on this computer is newer than RomM's; keeping it.")
         elif remote.hash is None:
-            ok("No save yet, here or in RomM. Starting fresh.")
+            ok("RomM has no save for this game yet (and neither does this computer).")
+            say(dim("Starting fresh; the save the game makes is uploaded to RomM when you close it."))
         else:
             self.mark_synced(game, remote.hash)
             ok("Save is already up to date.")
@@ -1467,6 +1515,7 @@ class Launcher:
             return False
         say(f"Uploading your save to RomM ({human_size(len(data))})…")
         try:
+            self.backup_romm_copy(game, save, local_hash)
             self.client.upload_save(game.id, save.upload_name, data, core_id(game.core or "unknown"))
         except RommError as exc:
             self.mark_pending(game)
@@ -1479,6 +1528,23 @@ class Launcher:
         self.mark_synced(game, local_hash)
         ok("Save uploaded to RomM.")
         return True
+
+    def backup_romm_copy(self, game: Game, save: FileSave | FolderSave, new_hash: str | None) -> None:
+        """An upload replaces RomM's save of the same name, so keep a copy of that first.
+        If the copy can't be made, raise, and nothing is uploaded."""
+        try:
+            for info in self.client.list_saves(game.id):
+                if info.get("file_name") != save.upload_name or info.get("missing_from_fs"):
+                    continue
+                data = self.client.download_save(info)
+                try:
+                    same = save.hash_of(data) == new_hash
+                except RommError:  # e.g. a broken zip: keep it anyway
+                    same = False
+                if not same:
+                    backup_bytes(data, game.id, "romm-before-upload", save.suffix)
+        except (RommError, OSError) as exc:
+            raise RommError(f"Couldn't back up the save RomM has now, so it wasn't replaced ({exc})") from exc
 
     def mark_pending(self, game: Game) -> None:
         entry = self.state.setdefault(str(game.id), {})

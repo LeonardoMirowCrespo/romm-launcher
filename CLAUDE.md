@@ -31,6 +31,13 @@ Flow when a game is picked:
   available, otherwise it's asked with `getpass` each run and kept in memory only.
 - **Never lose a save.** Anything that overwrites a save backs it up first. A failed upload
   must be loud and leave the local save untouched.
+- **Never delete or change anything on RomM.** The launcher only reads, and uploads saves.
+  `RommClient._check` enforces it on every request: GET only to the RomM server, POST only
+  to the paths and query parameters in `RommClient.ALLOWED_POSTS` (`/api/saves` with
+  `rom_id`/`emulator`, `/api/token`), never DELETE/PUT/PATCH; redirects to other servers
+  are refused. Don't widen that list without a very good reason. An upload replaces
+  RomM's save of the same name, so `Launcher.backup_romm_copy` downloads and backs up
+  that save first (`romm-before-upload`); if that fails, nothing is uploaded.
 - Must stay a single file that can be copied between machines (Windows and Linux).
 
 ## Code layout (`romm_launcher.py`)
