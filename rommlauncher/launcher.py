@@ -18,7 +18,7 @@ from . import system
 from .config import config_for_disk, load_config, roms_root
 from .core_downloads import CoreInstallError, core_info_dir, install_core, install_core_info
 from .dualscreen import SCREEN_CHOICES, SCREEN_LAYOUTS, TOUCH_CONTROLS
-from .games import Game, filter_games, index_roms, unpack_zip
+from .games import Game, filter_games, guess_platform, index_roms, unpack_zip
 from .retroarch import (
     DEFAULT_RETROARCH,
     FLATPAK_RETROARCH,
@@ -641,3 +641,84 @@ class Launcher:
         say(f"{save.location}  ({fmt_time(save.modified())}, {human_size(len(save.read()))})")
         if ask_yes(f"Upload this as the newest save of {game.name}?"):
             self.upload(game, save)
+
+    # ----- adding games to RomM -------------------------------------------
+
+    def add_rom(self, path: Path, platform: str | None = None, name: str | None = None) -> bool:
+        """Upload a game file to RomM as a new ROM, then have RomM scan for it.
+
+        Without `platform` the player picks one of the platforms RomM supports, theirs first
+        (the file's extension suggests one); this is also their confirmation. A platform that
+        isn't on their RomM yet is created for it. Nothing on RomM is replaced: a file of the
+        same name is refused. The file is also put in the ROM folder, so the game
+        doesn't have to be downloaded again to play it."""
+        if not self.client:
+            fail("Adding games needs a connection to RomM.")
+            return False
+        name = name or path.name
+        size = path.stat().st_size
+        mine = {p["fs_slug"]: p for p in self.client.list_platforms() if p.get("fs_slug") and p.get("id", 0) > 0}
+        known = {p.get("fs_slug") or p.get("slug"): p for p in self.client.list_supported_platforms()}
+        known = {slug: p for slug, p in known.items() if slug and slug not in mine}
+
+        def label(p: dict) -> str:
+            return p.get("display_name") or p.get("custom_name") or p.get("name") or p.get("fs_slug") or p.get("slug")
+
+        if platform:
+            if platform not in mine and platform not in known:
+                fail(f"RomM doesn't know a platform called {platform}.")
+                return False
+        else:
+            # Your RomM's platforms first, then every other platform RomM supports.
+            options = [(slug, label(p)) for slug, p in sorted(mine.items(), key=lambda kv: label(kv[1]).lower())]
+            options += [(slug, f"{label(p)}  (new in your RomM)")
+                        for slug, p in sorted(known.items(), key=lambda kv: label(kv[1]).lower())]
+            if not options:
+                fail("RomM didn't list any platforms to add the game to.")
+                return False
+            guess = guess_platform(name)
+            platform = choose(f"Add {name} ({human_size(size)}) to RomM as a game for:", options, "Platform",
+                              default=guess if guess in mine or guess in known else "", cancel=True,
+                              note="It's uploaded as a new game; nothing on RomM is replaced. A platform "
+                                   "that's new in your RomM is created for it.")
+            if platform is None:
+                return False
+        chosen = mine.get(platform) or {"fs_slug": platform, "name": label(known[platform])}
+        slug = chosen["fs_slug"]
+        cached = load_json(paths.LIBRARY_CACHE, {"roms": []}).get("roms", [])
+        if any(r.get("platform_fs_slug") == slug and (r.get("fs_name") or "").lower() == name.lower() for r in cached):
+            warn(f"{name} is already in your RomM library.")
+            return False
+        if "id" not in chosen:
+            chosen = self.client.add_platform(slug)
+            ok(f"{label(chosen)} added to your RomM's platforms.")
+        progress = progress_bar(f"Uploading {name}", size)
+        try:
+            self.client.upload_rom(chosen["id"], path, name, progress)
+        except RommError as exc:
+            if "already exists" in str(exc):
+                warn(f"RomM already has a file called {name} for that platform; nothing was changed.")
+                return False
+            raise
+        finally:
+            progress.finish()
+        ok(f"{name} uploaded to RomM.")
+        dest = roms_root(self.config) / slug / name
+        if path.resolve() != dest.resolve() and not dest.exists():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            part = dest.with_name(dest.name + ".part")
+            shutil.copyfile(path, part)
+            part.replace(dest)
+        try:
+            task = self.client.start_scan(chosen["id"])
+            say(dim("RomM is adding it to your library…"))
+            status = self.client.wait_for_task(task["task_id"]) if task.get("task_id") else "finished"
+        except RommError as exc:
+            warn(f"RomM didn't start a scan ({exc}). The game appears after RomM's next scan; you can "
+                 "start one in RomM's web page.")
+            return True
+        if status == "finished":
+            ok(f"{name} is in your library.")
+        else:
+            warn(f"RomM's scan ended as \"{status}\". If the game doesn't appear, scan in RomM's web page.")
+        return True

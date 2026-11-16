@@ -11,6 +11,7 @@ on another.
 - Plain Python, standard library only (nothing to install). Runs on **Windows** and **Linux**.
 - Your saves are never thrown away: anything that gets replaced is backed up first.
 - Works offline with games you've already downloaded; saves upload the next time you're online.
+- Add games you own (your own cartridge dumps) to RomM from the launcher.
 
 ## What you need
 
@@ -56,7 +57,14 @@ Opens the launcher as a window, like a game store's library:
   the **installed** ones, or **one platform** (N64, DS, …).
 - Click a game for its details on the right: **Play** (or double-click the cover),
   **Download only**, **Upload save**, for DS/3DS games the **screens** (main, both, corner),
-  and when you last played and synced. The game you played last is selected at the start.
+  when you last played and synced, and what RomM knows about the game: release year, genre,
+  rating, modes, series, region and its description. The game you played last is selected
+  at the start.
+- **+ Add game** (next to the search) uploads game files you own to RomM, such as dumps of
+  your own cartridges: pick the files, pick the platform (the file type suggests one; the
+  list has every platform RomM supports, yours first, with a search field), and the
+  launcher uploads them, asks RomM to scan for them, and they appear in your
+  library, already installed on this computer.
 - The bar at the bottom shows what's happening (downloads, save sync, RetroArch running);
   click **Activity** for the full log, which also opens by itself when something fails.
   Questions (like a save that changed in two places) come up as dialogs.
@@ -77,6 +85,7 @@ terminal window on Windows, use `pythonw romm_launcher.py --gui`.
 | `romm_launcher.py zelda` | Play the game matching "zelda" (asks if several match) |
 | `romm_launcher.py --list` | Show your library |
 | `romm_launcher.py --upload zelda` | Upload this computer's save of a game to RomM |
+| `romm_launcher.py --add game.gba` | Add game files you own to RomM (asks for the platform) |
 | `romm_launcher.py --no-launch zelda` | Download the ROM and save, but don't start RetroArch |
 | `romm_launcher.py --screen main mario` | DS/3DS: pick the screen layout without asking (`main`, `both` or `corner`) |
 | `romm_launcher.py --setup` | Change the RomM address, login or RetroArch paths |
@@ -103,9 +112,31 @@ retried the next time you start the launcher.
 
 ## What it does on your RomM server
 
-Only reading, and uploading saves. It can't delete or change anything else: every request
-is checked before it's sent, and anything other than a read or a save upload to your RomM
-server (deleting, editing, other servers) is refused.
+Reading, uploading saves, and adding new games when you ask it to. It can't delete or
+change anything else: every request is checked before it's sent, and anything else
+(deleting, editing, other servers) is refused. A new game is only ever added as a new file
+in a platform's folder (RomM refuses a name that's already there, and the launcher never
+asks it to overwrite), followed by a "quick" scan of that platform, which only picks up
+files RomM hasn't seen yet. If you add a game for a platform your RomM doesn't have yet,
+that platform is created first (an empty folder and its entry in RomM). Adding games needs
+a RomM user that's allowed to upload ROMs, create platforms and start scans; if the scan
+isn't allowed, the game shows up after RomM's next scan.
+
+## Adding games
+
+**+ Add game** in the window, or `--add <file>` in the terminal, uploads game files from
+your computer to RomM: dumps of cartridges you own, or homebrew you're allowed to share.
+The launcher doesn't download games from anywhere else.
+
+You can add games for any platform RomM supports. To **play** them, the launcher needs a
+RetroArch core for the platform: the platforms under "Platforms" below are set up already;
+for any other platform it asks which installed core to use the first time, and saves
+aren't synced for it until the platform has save settings in `config.json` (`platforms`).
+
+**A game has no description, genre or release year?** Those come from RomM's metadata
+(mostly IGDB). If RomM recognised the file but didn't match it to IGDB, open the game in
+RomM's web page, use **Match** to search IGDB for it and apply the right result, then press
+refresh (⟳) in the launcher.
 
 ## Platforms
 
@@ -117,6 +148,22 @@ These work out of the box:
 | `gba` | mGBA | `.srm` / `.sav` |
 | `nds`, `nintendo-dsi` | melonDS DS | `.srm` / `.sav` |
 | `3ds`, `new-nintendo-3ds` | Citra | Citra's save folder, synced as a `.zip` |
+| `nes`, `famicom` | FCEUmm | `.srm` |
+| `snes`, `sfam` | Snes9x | `.srm` |
+| `gb`, `gbc` | Gambatte | `.srm` |
+| `virtualboy` | Beetle VB | `.srm` |
+| `genesis`, `sms`, `gamegear`, `sg1000` | Genesis Plus GX | `.srm` |
+| `sega32` | PicoDrive | `.srm` |
+| `tg16` | Beetle PCE Fast | `.srm` |
+| `wonderswan`, `wonderswan-color` | Beetle WonderSwan | `.srm` |
+| `neo-geo-pocket`, `neo-geo-pocket-color` | Beetle NeoPop | `.srm` |
+| `psx` | PCSX-ReARMed | memory card 1, `.srm` |
+| `segacd`, `turbografx-cd`, `pokemon-mini`, `atari2600`, `atari7800`, `lynx`, `psp`, `dc` (Dreamcast), `ngc` (GameCube), `wii`, `saturn`, `arcade`, `neogeoaes`, `neogeomvs` | Genesis Plus GX, Beetle PCE Fast, PokeMini, Stella, ProSystem, Handy, PPSSPP, Flycast, Dolphin, Beetle Saturn, FinalBurn Neo | not synced (these cores keep saves their own way) |
+
+Missing cores are downloaded automatically. Some of these platforms also need BIOS files
+in RetroArch's `system` folder to run (PlayStation, Sega CD, TurboGrafx-CD, Saturn,
+Dreamcast); RetroArch tells you when one is missing. Any other platform: the first time
+you play, the launcher asks which installed core to use.
 
 **Two-screen games (DS, DSi, 3DS):** before the game starts, you choose a layout:
 
@@ -235,9 +282,9 @@ one file per topic:
 | `config.py` | `config.json`: defaults, per-system sections, moving old settings |
 | `dualscreen.py` | DS/3DS screen layouts and touch-screen controls |
 | `core_downloads.py` | Downloading missing cores from libretro |
-| `romm.py` | The RomM API, with its safety lock (only reads and save uploads) |
+| `romm.py` | The RomM API, with its safety lock (reads, save uploads, new ROMs only) |
 | `saves.py` | Save files, 3DS save folders, backups, deciding which save is newer |
-| `games.py` | A game from the library: ROM and save locations, search, covers |
+| `games.py` | A game from the library: ROM and save locations, search, covers, facts |
 | `launcher.py` | Logging in, the library, and playing a game (download, sync, run, upload) |
 | `gui.py` | The window (`--gui`) |
 | `cli.py` | The command line |

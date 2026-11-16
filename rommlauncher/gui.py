@@ -27,9 +27,11 @@ from .dualscreen import SCREEN_CHOICES, TOUCH_CONTROLS, screen_choices
 from .games import (
     ALL_GAMES,
     LOCAL_GAMES,
+    ROM_PLATFORMS,
     cover_file,
     fetch_cover,
     filter_library,
+    game_facts,
     library_filters,
     local_game_ids,
 )
@@ -37,7 +39,7 @@ from .launcher import Launcher
 from .retroarch import FLATPAK_RETROARCH, core_id, retroarch_command, retroarch_installed
 from .romm import LoginError, RommClient, RommError
 from .system import APP_NAME, HAVE_KEYRING, IS_WINDOWS, KEYRING_SERVICE, keyring
-from .ui import Quit, TerminalUI, fail, human_size, set_ui
+from .ui import Quit, TerminalUI, fail, filter_options, human_size, set_ui
 
 if TYPE_CHECKING:
     from .games import Game
@@ -46,11 +48,11 @@ if TYPE_CHECKING:
 try:  # for the GUI (--gui); part of Python, but a separate package on some Linux systems
     import tkinter as tk
     from tkinter import font as tkfont
-    from tkinter import messagebox, ttk
+    from tkinter import filedialog, messagebox, ttk
 
     HAVE_TK = True
 except Exception:
-    tk = tkfont = messagebox = ttk = None
+    tk = tkfont = filedialog = messagebox = ttk = None
     HAVE_TK = False
 
 
@@ -423,20 +425,26 @@ class GuiApp:
     # ----- library screen -------------------------------------------------
 
     def show_library(self) -> None:
-        """The library: icon rail, filter chips + cover grid, details on the right, status below."""
+        """The library: icon rail, title + search, filter chips and a cover grid, details on the
+        right, status below."""
         self._clear()
         outer = tk.Frame(self.root, bg=THEME["bg"])
         outer.pack(fill="both", expand=True)
         self.screen = outer
         self._build_rail(outer)
 
+        # The details panel scrolls, for games with a long description.
         self.details = tk.Frame(outer, bg=THEME["panel"], width=self.S(304))
         self.details.pack(side="right", fill="y")
         self.details.pack_propagate(False)
-        self.detail_box = tk.Frame(self.details, bg=THEME["panel"])
-        self.detail_box.pack(fill="both", expand=True, padx=self.S(24), pady=self.S(24))
-        self._details_height = 0
-        self.details.bind("<Configure>", self._on_details_resize)
+        self.details_canvas = tk.Canvas(self.details, bg=THEME["panel"], highlightthickness=0)
+        self.details_canvas.pack(fill="both", expand=True)
+        self.detail_box = tk.Frame(self.details_canvas, bg=THEME["panel"])
+        self.details_canvas.create_window(self.S(24), self.S(24), window=self.detail_box, anchor="nw",
+                                          width=self.S(256))
+        self.detail_box.bind("<Configure>", lambda e: self.details_canvas.configure(
+            scrollregion=(0, 0, self.S(304), e.height + self.S(48))))
+        self._wheel_area(self.details_canvas)
 
         center = tk.Frame(outer, bg=THEME["bg"])
         center.pack(side="left", fill="both", expand=True)
@@ -448,6 +456,10 @@ class GuiApp:
         self.v_search = tk.StringVar()
         self.v_search.trace_add("write", lambda *a: self.refresh_grid())
         self._build_search(head).pack(side="right")
+        if self.launcher.client:
+            self.add_button = self.pill(head, "+  Add game", self.add_files, kind="chip", size=9, height=self.S(34))
+            self.add_button.pack(side="right", padx=(0, self.S(10)))
+            self.tooltip(self.add_button, "Add game files you own to RomM")
 
         self.chip_row = tk.Frame(center, bg=THEME["bg"], height=self.S(30))
         self.chip_row.pack(fill="x", padx=(self.S(30), self.S(26)), pady=(self.S(16), self.S(12)))
@@ -486,8 +498,7 @@ class GuiApp:
         self.canvas.create_window((0, 0), window=self.grid_frame, anchor="nw")
         self.grid_frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.canvas.bind("<Configure>", self._on_canvas_resize)
-        self.canvas.bind("<Enter>", lambda e: self._bind_wheel(True))
-        self.canvas.bind("<Leave>", lambda e: self._bind_wheel(False))
+        self._wheel_area(self.canvas)
         self.columns = 0
         self.refresh_chips()
         self.show_details(None)
@@ -501,7 +512,9 @@ class GuiApp:
                  ("⟳", "Refresh the library", self.load_library, False),
                  ("⚙", "Settings", self.show_settings, False))
         for i, (glyph, tip, command, active) in enumerate(icons):
-            self.rail_icon(rail, glyph, tip, command, active).pack(pady=(self.S(18) if i == 0 else self.S(6), 0))
+            icon = self.rail_icon(rail, glyph, tip, command)
+            icon.set_active(active)
+            icon.pack(pady=(self.S(18) if i == 0 else self.S(6), 0))
         cfg = self.launcher.config
         where = "offline" if not self.launcher.client else urllib.parse.urlsplit(cfg.get("romm_url", "")).hostname
         user = cfg.get("username", "") or "?"
@@ -513,13 +526,24 @@ class GuiApp:
         self.tooltip(avatar, f"{user} · {where}")
         self.rail_icon(rail, "⎋", "Log out", self.log_out).pack(side="bottom")
 
-    def rail_icon(self, parent, glyph, tip, command, active=False):
-        idle_fg, idle_bg = (THEME["text"], THEME["chip"]) if active else (THEME["muted"], THEME["rail"])
+    def rail_icon(self, parent, glyph, tip, command):
+        """An icon button for the rail; .set_active(on) marks the screen that's showing."""
         icon = tk.Label(parent, image=self.px, compound="center", text=glyph, width=self.S(40), height=self.S(40),
-                        font=(self.icon_family, 15), fg=idle_fg, bg=idle_bg, cursor="hand2", bd=0)
+                        font=(self.icon_family, 15), fg=THEME["muted"], bg=THEME["rail"], cursor="hand2", bd=0)
+        icon.active = False
+
+        def paint(hover=False):
+            on = hover or icon.active
+            icon.config(fg=THEME["text"] if on else THEME["muted"], bg=THEME["chip"] if on else THEME["rail"])
+
+        def set_active(on: bool):
+            icon.active = on
+            paint()
+
+        icon.set_active = set_active
         icon.bind("<Button-1>", lambda e: command())
-        icon.bind("<Enter>", lambda e: icon.config(fg=THEME["text"], bg=THEME["chip"]), add="+")
-        icon.bind("<Leave>", lambda e: icon.config(fg=idle_fg, bg=idle_bg), add="+")
+        icon.bind("<Enter>", lambda e: paint(True), add="+")
+        icon.bind("<Leave>", lambda e: paint(), add="+")
         self.tooltip(icon, tip)
         return icon
 
@@ -550,11 +574,6 @@ class GuiApp:
         update_hint()
         return box
 
-    def _on_details_resize(self, event) -> None:
-        """Redraw the details when the window gets much taller or shorter (the cover is sized to fit)."""
-        if self.selected and abs(event.height - self._details_height) > self.S(30):
-            self.show_details(self.selected)
-
     def _on_scroll(self, first, last) -> None:
         """The scrollbar shows only when there's something to scroll."""
         self.scroll.set(first, last)
@@ -564,20 +583,28 @@ class GuiApp:
         elif not needed and self.scroll.winfo_ismapped():
             self.scroll.pack_forget()
 
-    def _bind_wheel(self, on: bool) -> None:
+    def _wheel_area(self, canvas) -> None:
+        """The mouse wheel scrolls `canvas` while the pointer is over it (or anything on it)."""
+        canvas.bind("<Enter>", lambda e: self._bind_wheel(canvas))
+        canvas.bind("<Leave>", lambda e: None if self._inside(canvas, e) else self._bind_wheel(None))
+
+    def _bind_wheel(self, canvas) -> None:
+        self.wheel_canvas = canvas
         for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-            if on:
+            if canvas is not None:
                 self.root.bind_all(seq, self._on_wheel)
             else:
                 self.root.unbind_all(seq)
 
     def _on_wheel(self, event) -> None:
+        canvas = getattr(self, "wheel_canvas", None)
+        if canvas is None or not canvas.winfo_exists() or tuple(canvas.yview()) == (0.0, 1.0):
+            return  # gone, or everything already fits
         if getattr(event, "num", None) in (4, 5):
             step = -3 if event.num == 4 else 3
         else:
             step = -int(event.delta / 40) if abs(event.delta) >= 40 else (-1 if event.delta > 0 else 1)
-        if self.scroll.winfo_ismapped():  # everything already fits otherwise
-            self.canvas.yview_scroll(step, "units")
+        canvas.yview_scroll(step, "units")
 
     def _on_canvas_resize(self, event) -> None:
         columns = max(1, (event.width - self.S(10)) // (self.TILE_W + self.S(24)))
@@ -737,9 +764,8 @@ class GuiApp:
     def platform_color(self, slug: str) -> str:
         return PLATFORM_COLORS[sum(map(ord, slug)) % len(PLATFORM_COLORS)]
 
-    def make_tile(self, game: Game):
-        """A cover with its platform in the corner, the name and whether it's installed below."""
-        selected = bool(self.selected and self.selected.id == game.id)
+    def _tile(self, key, name, platform, platform_name, image, status, status_color, selected, on_click, on_double):
+        """A cover in a fixed box with its platform in the corner, the name and a status line below."""
         tile = tk.Frame(self.grid_frame, bg=THEME["bg"], cursor="hand2")
         ring = tk.Frame(tile, bg=THEME["accent"] if selected else THEME["bg"], padx=self.S(2), pady=self.S(2))
         ring.pack(anchor="w")
@@ -748,70 +774,96 @@ class GuiApp:
         box = tk.Frame(ring, bg=THEME["bg"], width=self.TILE_W, height=self.COVER_H)
         box.pack()
         box.pack_propagate(False)
-        image = self.tile_images.get(game.id)
         if image:
             cover = tk.Label(box, image=image, bg=THEME["bg"], bd=0)
         else:
             cover = tk.Label(box, image=self.px, compound="center", width=self.TILE_W, height=self.COVER_H * 9 // 10,
-                             text=game.name, wraplength=self.TILE_W - self.S(28), font=self.font(11, "bold"),
-                             fg="#ffffff", bg=self.platform_color(game.platform), bd=0)
+                             text=name, wraplength=self.TILE_W - self.S(28), font=self.font(11, "bold"),
+                             fg="#ffffff", bg=self.platform_color(platform), bd=0)
         cover.pack(expand=True)  # centred, so the box shows above and below it
         # A sibling placed over the cover, not a child of it: Windows repaints a label's
         # image over its children.
-        tag = tk.Label(box, text=PLATFORM_SHORT.get(game.platform, game.platform_name), font=self.font(8, "bold"),
+        tag = tk.Label(box, text=PLATFORM_SHORT.get(platform, platform_name), font=self.font(8, "bold"),
                        fg=THEME["text"], bg=THEME["rail"], padx=self.S(5), pady=0)
         tag.place(in_=cover, relx=1.0, x=-self.S(6), y=self.S(6), anchor="ne")
         tag.lift()
-        title = self.label(tile, self.fit_text(game.name, self.font(10, "bold"), self.TILE_W), 10, "bold", anchor="w")
+        title = self.label(tile, self.fit_text(name, self.font(10, "bold"), self.TILE_W), 10, "bold", anchor="w")
         title.pack(fill="x", padx=self.S(2), pady=(self.S(8), 0))
-        local = game.id in self.local_ids
-        status = self.label(tile, "●  Installed" if local else "☁  In the cloud", 9,
-                            fg=THEME["ok"] if local else THEME["muted"], anchor="w")
-        status.pack(fill="x", padx=self.S(2))
-        for w in (tile, ring, box, cover, tag, title, status):
-            w.bind("<Button-1>", lambda e, g=game: self.select(g))
-            w.bind("<Double-Button-1>", lambda e, g=game: self.play(g))
-        tile.bind("<Enter>", lambda e: self._hover(game, True))
-        tile.bind("<Leave>", lambda e: self._hover(game, self._inside(tile, e)))
-        self.tiles[game.id] = (ring, cover)
+        line = self.label(tile, status, 9, fg=status_color, anchor="w")
+        line.pack(fill="x", padx=self.S(2))
+        for w in (tile, ring, box, cover, tag, title, line):
+            w.bind("<Button-1>", lambda e: on_click())
+            if on_double:
+                w.bind("<Double-Button-1>", lambda e: on_double())
+        tile.bind("<Enter>", lambda e: self._hover(key, True))
+        tile.bind("<Leave>", lambda e: self._hover(key, self._inside(tile, e)))
+        self.tiles[key] = (ring, cover)
         return tile
+
+    def make_tile(self, game: Game):
+        local = game.id in self.local_ids
+        return self._tile(game.id, game.name, game.platform, game.platform_name, self.tile_images.get(game.id),
+                          "●  Installed" if local else "☁  In the cloud", THEME["ok"] if local else THEME["muted"],
+                          bool(self.selected and self.selected.id == game.id),
+                          lambda: self.select(game), lambda: self.play(game))
 
     def _inside(self, widget, event) -> bool:
         """Whether the pointer is still over widget or one of its children (Leave fires for those too)."""
         under = widget.winfo_containing(event.x_root, event.y_root)
         return under is not None and str(under).startswith(str(widget))
 
-    def _hover(self, game: Game, on: bool) -> None:
-        tile = self.tiles.get(game.id)
-        if tile and not (self.selected and self.selected.id == game.id):
+    def _selected_key(self):
+        return self.selected.id if self.selected else None
+
+    def _hover(self, key, on: bool) -> None:
+        tile = self.tiles.get(key)
+        if tile and key != self._selected_key():
             tile[0].config(bg=THEME["hover"] if on else THEME["bg"])
 
+    def _mark(self, old_key, new_key) -> None:
+        if old_key in self.tiles:
+            self.tiles[old_key][0].config(bg=THEME["bg"])
+        if new_key in self.tiles:
+            self.tiles[new_key][0].config(bg=THEME["accent"])
+
     def select(self, game: Game) -> None:
-        old = self.selected
+        old = self.selected.id if self.selected else None
         self.selected = game
-        if old and old.id in self.tiles:
-            self.tiles[old.id][0].config(bg=THEME["bg"])
-        if game.id in self.tiles:
-            self.tiles[game.id][0].config(bg=THEME["accent"])
+        self._mark(old, game.id)
         self.show_details(game)
 
-    # ----- game details ---------------------------------------------------
+    # ----- details panel --------------------------------------------------
+
+    def _clear_details(self):
+        for w in self.detail_box.winfo_children():
+            w.destroy()
+        self.details_canvas.yview_moveto(0)
+        self.play_button = None
+        return self.detail_box
+
+    def _info_rows(self, box, rows) -> None:
+        tk.Frame(box, bg=THEME["line"], height=1).pack(fill="x", pady=self.S(18))
+        info = tk.Frame(box, bg=THEME["panel"])
+        info.pack(fill="x")
+        for i, (name, value, color) in enumerate(rows):
+            self.label(info, name, 9, fg=THEME["muted"], anchor="nw").grid(row=i, column=0, sticky="nw", pady=self.S(2))
+            self.label(info, value, 9, fg=color, anchor="w", wraplength=self.S(170), justify="left").grid(
+                row=i, column=1, sticky="w", padx=(self.S(16), 0), pady=self.S(2))
+
+    def _about(self, box, text: str) -> None:
+        self.label(box, "About", 9, fg=THEME["muted"], anchor="w").pack(fill="x", pady=(self.S(18), self.S(4)))
+        self.label(box, text, 9, fg=THEME["soft"], anchor="w", justify="left", wraplength=self.S(256)).pack(fill="x")
 
     def show_details(self, game: Game | None) -> None:
-        box = self.detail_box
-        for w in box.winfo_children():
-            w.destroy()
-        self.play_button = None
+        box = self._clear_details()
         if game is None:
             self.label(box, "Select a game", 12, fg=THEME["muted"]).pack(pady=(self.S(80), self.S(4)))
             self.label(box, "Double-click a cover to play.", 9, fg=THEME["muted"]).pack()
             return
         width = self.S(256)
         image = self.covers.get(game.id)
-        room = self.details.winfo_height() - self.S(540)  # what's left for the cover; none on a short window
-        self._details_height = self.details.winfo_height()
-        if image and room >= self.S(90):
-            self._detail_image = self.fit_image(image, width, min(self.DETAIL_H, room))
+        if image:
+            self._detail_image = self.fit_image(image, width, self.DETAIL_H)
             tk.Label(box, image=self._detail_image, bg=THEME["panel"], bd=0).pack(anchor="w", pady=(0, self.S(16)))
         self.label(box, game.name, 15, "bold", wraplength=width, justify="left", anchor="w").pack(fill="x")
         size = game.rom.get("fs_size_bytes")
@@ -854,9 +906,6 @@ class GuiApp:
                 b.pack(side="left", padx=(0, self.S(6)))
                 b.set_enabled(not self.busy)
 
-        tk.Frame(box, bg=THEME["line"], height=1).pack(fill="x", pady=self.S(18))
-        info = tk.Frame(box, bg=THEME["panel"])
-        info.pack(fill="x")
         played = entry.get("last_played", "")
         if entry.get("pending_upload"):
             save, color = "Waiting to upload to RomM", THEME["warn"]
@@ -866,13 +915,13 @@ class GuiApp:
             save, color = f"Synced {friendly_time(entry['synced_at']).lower()}", THEME["text"]
         else:
             save, color = "Not synced yet", THEME["muted"]
-        rows = (("Status", "Installed" if local else "In the cloud", THEME["ok"] if local else THEME["text"]),
+        rows = [("Status", "Installed" if local else "In the cloud", THEME["ok"] if local else THEME["text"]),
                 ("Last played", friendly_time(played), THEME["text"]),
-                ("Save", save, color))
-        for i, (name, value, color) in enumerate(rows):
-            self.label(info, name, 9, fg=THEME["muted"], anchor="w").grid(row=i, column=0, sticky="w", pady=self.S(2))
-            self.label(info, value, 9, fg=color, anchor="w", wraplength=self.S(170), justify="left").grid(
-                row=i, column=1, sticky="w", padx=(self.S(16), 0), pady=self.S(2))
+                ("Save", save, color)]
+        rows += [(name, value, THEME["text"]) for name, value in game_facts(game.rom)]
+        self._info_rows(box, rows)
+        if game.rom.get("summary"):
+            self._about(box, game.rom["summary"].strip())
 
     def _layout_chips(self, choices) -> None:
         for w in self.layout_row.winfo_children():
@@ -895,7 +944,7 @@ class GuiApp:
         choices = screen_choices(game)
         screen = self.v_layout.get() if choices else None
         self.busy, self.playing = True, game
-        self.show_details(game)
+        self.show_details(self.selected)
         self.log("")
         self.log(f"▶ {game.name}", "info")
 
@@ -917,7 +966,7 @@ class GuiApp:
         if self.busy:
             return
         self.busy = True
-        self.show_details(game)
+        self.show_details(self.selected)
 
         def done(result):
             self.busy = False
@@ -926,6 +975,39 @@ class GuiApp:
             self.show_details(self.selected)
 
         self.run_task(lambda: self.launcher.upload_now(game), done)
+
+    # ----- adding games ---------------------------------------------------
+
+    def add_files(self) -> None:
+        """Pick game files you own and add them to RomM (the launcher asks which platform)."""
+        if self.busy or not self.launcher.client:
+            return
+        files = filedialog.askopenfilenames(
+            parent=self.root, title="Add games you own to RomM",
+            filetypes=[("Game files", " ".join(f"*{ext}" for ext in sorted(ROM_PLATFORMS)) + " *.zip *.7z"),
+                       ("All files", "*.*")])
+        if not files:
+            return
+        self.busy = True
+        self.log("")
+
+        def work():
+            return [self.launcher.add_rom(Path(f)) for f in files]
+
+        def done(result):
+            self.busy = False
+            self._after_adding(result)
+
+        self.run_task(work, done)
+
+    def _after_adding(self, result) -> None:
+        if isinstance(result, Quit):
+            self.log("Cancelled.", "warn")
+        elif isinstance(result, (RommError, OSError)):
+            self.log(str(result), "fail")
+        elif isinstance(result, BaseException):
+            self.log(f"Something went wrong: {result!r}", "fail")
+        self.load_library()
 
     # ----- drawing helpers ------------------------------------------------
 
@@ -1112,7 +1194,10 @@ class GuiApp:
         return result.get("value")
 
     def ask_choice(self, question, options, default="", cancel=False, note=""):
-        """A question with one radio button per option; returns the chosen key, or None."""
+        """A question with one radio button per option (a searchable list when there are
+        many); returns the chosen key, or None."""
+        if len(options) > self.RADIO_LIMIT:
+            return self.ask_from_list(question, options, default, cancel, note)
         dlg = self._dialog(APP_NAME)
         keys = [k for k, _ in options]
         var = tk.StringVar(value=default if default in keys else keys[0])
@@ -1136,6 +1221,79 @@ class GuiApp:
         if cancel:
             self.button(row, "Cancel", lambda: finish(None)).pack(side="left", padx=(self.S(8), 0))
         dlg.protocol("WM_DELETE_WINDOW", lambda: finish(None if cancel else var.get()))
+        self._run_dialog(dlg)
+        return result["value"]
+
+    RADIO_LIMIT = 12  # more options than this get a searchable list
+
+    def ask_from_list(self, question, options, default="", cancel=False, note=""):
+        """A long choice as a search field over a list: type to narrow it down, then
+        double-click, or Enter for the highlighted one. Returns the key, or None."""
+        dlg = self._dialog(APP_NAME)
+        result = {"value": None if cancel else (default or options[0][0])}
+        self.label(dlg, question, 11, "bold", wraplength=self.S(460), justify="left").pack(anchor="w")
+        if note:
+            self.label(dlg, note, 9, fg=THEME["muted"], wraplength=self.S(460), justify="left").pack(
+                anchor="w", pady=(self.S(4), 0))
+        text = tk.StringVar()
+        search = self.entry(dlg, text, width=40)
+        search.pack(fill="x", ipady=self.S(5), pady=(self.S(12), self.S(6)))
+        frame = tk.Frame(dlg, bg=THEME["panel"])
+        frame.pack(fill="both", expand=True)
+        listbox = tk.Listbox(frame, height=14, font=self.font(10), fg=THEME["text"], bg=THEME["entry"],
+                             selectbackground=THEME["accent"], selectforeground=THEME["on_accent"],
+                             activestyle="none", relief="flat", bd=0, highlightthickness=0, exportselection=False)
+        bar = ttk.Scrollbar(frame, orient="vertical", command=listbox.yview)
+        listbox.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        listbox.pack(side="left", fill="both", expand=True)
+        shown: list[tuple[str, str]] = []
+
+        def refill(*args):
+            current = shown[listbox.curselection()[0]][0] if shown and listbox.curselection() else default
+            shown[:] = filter_options(options, text.get())
+            listbox.delete(0, "end")
+            for _, label in shown:
+                listbox.insert("end", label)
+            keys = [k for k, _ in shown]
+            index = keys.index(current) if current in keys else (0 if shown else None)
+            if index is not None:
+                listbox.selection_set(index)
+                listbox.see(index)
+
+        def finish(ok: bool):
+            if ok:
+                if not listbox.curselection():
+                    return
+                result["value"] = shown[listbox.curselection()[0]][0]
+            elif cancel:
+                result["value"] = None
+            dlg.destroy()
+
+        def move(step: int):
+            if shown:
+                index = min(max((listbox.curselection() or (0,))[0] + step, 0), len(shown) - 1)
+                listbox.selection_clear(0, "end")
+                listbox.selection_set(index)
+                listbox.see(index)
+            return "break"
+
+        text.trace_add("write", refill)
+        search.bind("<Return>", lambda e: finish(True))
+        search.bind("<Down>", lambda e: move(1))
+        search.bind("<Up>", lambda e: move(-1))
+        listbox.bind("<Double-Button-1>", lambda e: finish(True))
+        listbox.bind("<Return>", lambda e: finish(True))
+        dlg.bind("<Escape>", lambda e: finish(False))
+        row = tk.Frame(dlg, bg=THEME["panel"])
+        row.pack(anchor="e", pady=(self.S(14), 0))
+        self.button(row, "OK", lambda: finish(True), primary=True).pack(side="left")
+        if cancel:
+            self.button(row, "Cancel", lambda: finish(False)).pack(side="left", padx=(self.S(8), 0))
+        dlg.protocol("WM_DELETE_WINDOW", lambda: finish(False))
+        refill()
+        self.list_dialog = (text, listbox, shown, finish)  # for the tests
+        dlg.after(50, search.focus_set)
         self._run_dialog(dlg)
         return result["value"]
 

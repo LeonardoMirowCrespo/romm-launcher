@@ -35,6 +35,41 @@ DEFAULT_PLATFORMS = {
     # RomM as one zip of that folder (see FolderSave).
     "3ds": {"core": "citra", "save_exts": ["zip"], "save_layout": "citra"},
     "new-nintendo-3ds": {"core": "citra", "save_exts": ["zip"], "save_layout": "citra"},
+    # More platforms. Saves are synced where the core keeps a game's save as one
+    # <game>.srm file; cores that keep saves their own way (memory card images, save
+    # folders, shared backup RAM) get the core only, and their saves aren't synced.
+    "nes": {"core": "fceumm", "save_exts": ["srm"]},
+    "famicom": {"core": "fceumm", "save_exts": ["srm"]},
+    "snes": {"core": "snes9x", "save_exts": ["srm"]},
+    "sfam": {"core": "snes9x", "save_exts": ["srm"]},
+    "gb": {"core": "gambatte", "save_exts": ["srm"]},
+    "gbc": {"core": "gambatte", "save_exts": ["srm"]},
+    "virtualboy": {"core": "mednafen_vb", "save_exts": ["srm"]},
+    "genesis": {"core": "genesis_plus_gx", "save_exts": ["srm"]},
+    "sms": {"core": "genesis_plus_gx", "save_exts": ["srm"]},
+    "gamegear": {"core": "genesis_plus_gx", "save_exts": ["srm"]},
+    "sg1000": {"core": "genesis_plus_gx", "save_exts": ["srm"]},
+    "sega32": {"core": "picodrive", "save_exts": ["srm"]},
+    "tg16": {"core": "mednafen_pce_fast", "save_exts": ["srm"]},
+    "wonderswan": {"core": "mednafen_wswan", "save_exts": ["srm"]},
+    "wonderswan-color": {"core": "mednafen_wswan", "save_exts": ["srm"]},
+    "neo-geo-pocket": {"core": "mednafen_ngp", "save_exts": ["srm"]},
+    "neo-geo-pocket-color": {"core": "mednafen_ngp", "save_exts": ["srm"]},
+    "psx": {"core": "pcsx_rearmed", "save_exts": ["srm"]},  # memory card 1
+    "segacd": {"core": "genesis_plus_gx", "save_exts": []},
+    "turbografx-cd": {"core": "mednafen_pce_fast", "save_exts": []},
+    "pokemon-mini": {"core": "pokemini", "save_exts": []},
+    "atari2600": {"core": "stella", "save_exts": []},
+    "atari7800": {"core": "prosystem", "save_exts": []},
+    "lynx": {"core": "handy", "save_exts": []},
+    "psp": {"core": "ppsspp", "save_exts": []},
+    "dc": {"core": "flycast", "save_exts": []},
+    "ngc": {"core": "dolphin", "save_exts": []},
+    "wii": {"core": "dolphin", "save_exts": []},
+    "saturn": {"core": "mednafen_saturn", "save_exts": []},
+    "arcade": {"core": "fbneo", "save_exts": []},
+    "neogeoaes": {"core": "fbneo", "save_exts": []},
+    "neogeomvs": {"core": "fbneo", "save_exts": []},
 }
 # Platform settings older versions wrote into config.json; dropped when loading.
 OLD_PLATFORM_DEFAULTS = {"3ds": {"save_exts": [], "sync_saves": False}}

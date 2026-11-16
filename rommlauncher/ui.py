@@ -76,10 +76,13 @@ class TerminalUI:
     def choose(self, question: str, options: list[tuple[str, str]], prompt: str,
                default: str = "", cancel: bool = False, kind: str = "info", note: str = "") -> str | None:
         """Pick one of `options` ((key, label) pairs); returns its key, or None when
-        `cancel` is allowed and the player types q."""
+        `cancel` is allowed and the player types q. A long list is searched instead of
+        printed: type part of a name, then pick from what matches."""
         print()
         if question:
             self.say(question, kind)
+        if len(options) > self.LIST_LIMIT:
+            return self._choose_by_search(options, default, cancel, note)
         for key, label in options:
             self.say(f"    {key}  {label}")
         if note:
@@ -92,8 +95,51 @@ class TerminalUI:
             if answer in keys or answer.lower() in keys:
                 return answer if answer in keys else answer.lower()
 
+    LIST_LIMIT = 20  # more options than this are searched rather than all printed
+
+    def _choose_by_search(self, options, default, cancel, note) -> str | None:
+        labels = dict(options)
+        if note:
+            self.say(dim(f"    {note}"))
+        if default in labels:
+            self.say(f"    Suggested: {labels[default]}")
+        while True:
+            extras = (["Enter = the suggestion"] if default in labels else []) + (["q = cancel"] if cancel else [])
+            answer = self.ask("Type part of the name" + (f" ({', '.join(extras)})" if extras else "")).strip()
+            if cancel and answer.lower() == "q":
+                return None
+            if not answer:
+                if default in labels:
+                    return default
+                continue
+            matches = filter_options(options, answer)
+            if not matches:
+                self.say(dim(f"    Nothing matches \"{answer}\". Try another word."))
+                continue
+            if len(matches) == 1:
+                return matches[0][0]
+            for i, (_, label) in enumerate(matches[: self.LIST_LIMIT], 1):
+                self.say(f"    {i:>2}  {label}")
+            if len(matches) > self.LIST_LIMIT:
+                self.say(dim(f"    … and {len(matches) - self.LIST_LIMIT} more; type more of the name."))
+            pick = self.ask("Number (Enter = search again)").strip()
+            if pick.isdigit() and 1 <= int(pick) <= min(len(matches), self.LIST_LIMIT):
+                return matches[int(pick) - 1][0]
+
     def progress(self, label: str, total: int | None) -> "Progress":
         return Progress(label, total)
+
+
+def filter_options(options: list[tuple[str, str]], text: str) -> list[tuple[str, str]]:
+    """The (key, label) options whose key or label has every word of `text` (an exact key
+    first), for searching a long list of choices."""
+    text = text.strip().lower()
+    if not text:
+        return list(options)
+    exact = [(k, v) for k, v in options if k.lower() == text]
+    words = text.split()
+    return exact + [(k, v) for k, v in options
+                    if (k, v) not in exact and all(w in f"{k} {v}".lower() for w in words)]
 
 
 UI = TerminalUI()
