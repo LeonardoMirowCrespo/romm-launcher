@@ -12,6 +12,7 @@ import sys
 import subprocess
 import tempfile
 import threading
+from datetime import datetime
 from email.parser import BytesParser
 from email.policy import HTTP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -807,6 +808,11 @@ check("filter: sorted by name", [g.name for g in games.filter_library(library, "
 check("screen choices only for two-screen cores", dualscreen.screen_choices(ds) == ["main", "both", "corner"]
       and dualscreen.screen_choices(oot) == [])
 
+now = datetime(2026, 11, 16, 22, 0)
+check("friendly times", [gui.friendly_time(t, now) for t in ("2026-11-16T20:05:13", "2026-11-15 09:30",
+                                                              "2026-11-12T10:00:00", "2026-10-03T10:00", "")]
+      == ["Today, 20:05", "Yesterday, 09:30", "Thursday, 10:00", "3 Oct 2026", "Never"])
+
 # Covers: downloaded once from RomM, PNG only.
 paths.COVER_DIR = tmp / "covers"
 cov = games.Game(dict(ROMS[0], id=30, path_cover_small="/assets/romm/resources/roms/4/30/cover/small.png?ts=2026-11-14 12:46:31"), app.config)
@@ -838,25 +844,40 @@ if window:
     window.show_login()
     check("login asks for address, username and password", window.v_url.get().rstrip("/") == base.rstrip("/")
           and window.v_user.get() == "leo" and window.v_pass.get() == "")
+    check("known address shown under the box, not asked", window.address_line is not None
+          and any(base.split("//")[1].rstrip("/") in w.cget("text") for w in window.address_line.winfo_children()))
+    window.edit_address()
+    window.v_url.set("https://other.example")
+    window.finish_address_edit(False)  # what Escape does
+    check("Escape undoes an address edit", window.v_url.get().rstrip("/") == base.rstrip("/")
+          and isinstance(window.address_line.winfo_children()[0], gui.tk.Label))
     window.v_pass.set("wrong")
     window.do_login()
     check("wrong password shown", pump(lambda: "rejected" in window.login_msg.cget("text")))
     window.v_pass.set("pw")
     window.do_login()
     check("library loads after login", pump(lambda: len(window.tiles) == 3))
-    check("sidebar has platforms", any("Nintendo 64" in w.cget("text") for row in window.sidebar.winfo_children()
-                                       for w in row.winfo_children() if isinstance(w, gui.tk.Label)))
+    check("filter chips: all, installed, then platforms",
+          list(window.chips) == ["all", "local", "platform:gba", "platform:n64"]
+          and [c.text for c in window.chips.values()] == ["All", "Installed", "GBA", "N64"])
     window.v_search.set("zelda")
     check("search narrows the grid", list(window.tiles) == [7])
     window.v_search.set("")
-    window.set_filter("platform:gba")
+    window.chips["platform:gba"].invoke()
     check("platform filter", list(window.tiles) == [9])
     window.set_filter("all")
     window.select(oot)
-    check("details for the selected game", any(isinstance(w, gui.tk.Button) and w.cget("text") == "Play"
-                                               for w in window.detail_box.winfo_children()))
+    check("details for the selected game", window.play_button is not None
+          and window.play_button.text.endswith("Play") and window.play_button.enabled)
     window.select(ds)
-    check("DS game: layout choices shown", window.v_layout.get() in ("main", "both", "corner"))
+    check("DS game: layout choices shown", window.v_layout.get() in ("main", "both", "corner")
+          and len(window.layout_row.winfo_children()) == 3)
+    window.layout_row.winfo_children()[0].invoke()
+    check("layout chip picks the layout", window.v_layout.get() == "main")
+    wide, big = gui.tk.PhotoImage(width=204, height=142), gui.tk.PhotoImage(width=408, height=408)
+    fitted = [window.fit_image(i, 204, 204) for i in (wide, big)]
+    check("covers fit whole, never cut", [(i.width(), i.height()) for i in fitted] == [(204, 142), (204, 204)])
+    check("cover title cut to fit", window.fit_text("x" * 200, window.font(10, "bold"), window.TILE_W).endswith("…"))
     # The launcher's questions from a worker thread become dialogs on Tk's thread.
     window.ask_choice = lambda question, options, default, cancel, note: "l"
     got = {}
@@ -865,6 +886,10 @@ if window:
     threading.Thread(target=lambda: ui.warn("hello from the worker"), daemon=True).start()
     check("worker-thread messages reach the activity log",
           pump(lambda: "hello from the worker" in window.activity.get("1.0", "end")))
+    check("the status bar shows the last message", "hello from the worker" in window.status.cget("text")
+          and not window.activity_open)
+    window.log("upload failed", "fail")
+    check("a failure opens the activity log", window.activity_open)
     ui.set_ui(ui.TerminalUI())
     window.root.destroy()
 

@@ -115,11 +115,19 @@ the terminal doesn't kill the game.
 
 **The GUI** (`gui.py`: `run_gui`, `--gui`). Tkinter is imported at the top of `gui.py`
 in a try (`HAVE_TK`), so the CLI works without it. `GuiApp` builds a
-login screen (`show_login`: RomM address, username, password, keyring checkbox, "Play
-offline" if `library.json` exists) and the library screen (`show_library`: top bar with
-search, sidebar from `library_filters`, a cover grid on a Canvas filtered by
-`filter_library`, a details panel with Play / Download only / Upload save and the
-`screen_choices` radio buttons, an activity log, a status bar with progress). It drives
+login screen (`show_login`: username, password, keyring checkbox, "Play offline" if
+`library.json` exists; the RomM address is a field only until one is saved, after that a
+line at the bottom, `show_address`, that turns into a field on click, `edit_address`) and the library screen (`show_library`, the "Shelf"
+design chosen 2026-11-16: an icon rail on the left (library, refresh, settings, log out,
+avatar with tooltip), "Library" title + rounded search, filter chips from `library_filters`
+(`PLATFORM_SHORT` names, wrapped by `_flow_chips`), a cover grid on a Canvas filtered
+by `filter_library`: each cover sits whole and unscaled in the middle of a 204 px box (RomM's
+small covers are 204 px wide, up to 204 tall), the rest of the box see-through and outlined
+on hover/selection, a platform tag over its corner, a details panel with Play / Download only /
+Upload save, `screen_choices` as chips and an info list, and a status bar whose "Activity"
+toggle shows the log, which opens by itself on a failure). Rounded buttons and chips are
+Canvas drawings from `GuiApp.pill` (`.text`, `.invoke()`, `.set_enabled()`); `fit_image`
+scales covers down by a/b fractions to fit whole (Tk has no free scaling without Pillow). It drives
 the same `Launcher` (`play(game, launch, screen)`, `upload_now`, `library`,
 `retry_pending`, `auto_setup_retroarch` on first start) on worker threads (`run_task`).
 Tk is only touched on the main thread: `GuiUI` hands calls to `GuiApp.calls` (a queue
