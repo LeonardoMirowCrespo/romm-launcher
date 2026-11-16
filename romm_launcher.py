@@ -108,9 +108,11 @@ DEFAULT_PLATFORMS = {
     "n64": {"core": "mupen64plus_next", "save_exts": ["srm"]},
     "gba": {"core": "mgba", "save_exts": ["srm", "sav"]},
     "nds": {"core": "melondsds", "save_exts": ["srm", "sav"]},
+    "nintendo-dsi": {"core": "melondsds", "save_exts": ["srm", "sav"]},
     # Citra keeps a 3DS save as a folder inside its virtual SD card. It's synced with
     # RomM as one zip of that folder (see FolderSave).
     "3ds": {"core": "citra", "save_exts": ["zip"], "save_layout": "citra"},
+    "new-nintendo-3ds": {"core": "citra", "save_exts": ["zip"], "save_layout": "citra"},
 }
 # Platform settings older versions wrote into config.json; dropped when loading.
 OLD_PLATFORM_DEFAULTS = {"3ds": {"save_exts": [], "sync_saves": False}}
@@ -502,6 +504,13 @@ def core_save_folder(saves_dir: str, cores_dir: str, core_file: str, info_dir: s
 
     RetroArch names it after the core's display name, which is in the core's
     .info file. Falls back to a few known names, then to the saves folder."""
+    name = core_display_name(cores_dir, core_file, info_dir)
+    return str(Path(saves_dir) / name) if name else saves_dir
+
+
+def core_display_name(cores_dir: str, core_file: str, info_dir: str | None = None) -> str | None:
+    """The core's name as RetroArch shows it ("melonDS DS"), from its .info file, else a
+    known name. RetroArch names the core's save and settings folders after it."""
     cid = core_id(core_file)
     name = None
     base = Path(cores_dir)
@@ -519,8 +528,77 @@ def core_save_folder(saves_dir: str, cores_dir: str, core_file: str, info_dir: s
                 break
         except OSError:
             continue
-    name = name or KNOWN_CORE_FOLDERS.get(cid)
-    return str(Path(saves_dir) / name) if name else saves_dir
+    return name or KNOWN_CORE_FOLDERS.get(cid)
+
+
+# Cores that show two screens (DS, DSi, 3DS): the core options for showing only the main
+# (top) screen, both screens, or the main screen with the touch screen small in the
+# bottom-right corner ("corner"; only where the core's code puts it there). Names and
+# values are from each core's source code.
+SCREEN_CHOICES = {
+    "main": "Main screen only",
+    "both": "Both screens",
+    "corner": "Main screen + small touch screen in the bottom-right corner",
+}
+SCREEN_LAYOUTS = {
+    # Hybrid layout, "Show Opposite Screen": the bottom screen alone, small, bottom right.
+    # A 3:1 ratio is the smallest it gets, and makes the whole picture almost exactly 16:9.
+    "melondsds": {"main": {"melonds_screen_layout1": "top"},
+                  "both": {"melonds_screen_layout1": "top-bottom"},
+                  "corner": {"melonds_screen_layout1": "hybrid-top", "melonds_hybrid_ratio": "3",
+                             "melonds_hybrid_small_screen": "one"}},
+    "melonds": {"main": {"melonds_screen_layout": "Top Only"},
+                "both": {"melonds_screen_layout": "Top/Bottom"}},
+    "desmume": {"main": {"desmume_screens_layout": "top only"},
+                "both": {"desmume_screens_layout": "top/bottom"}},
+    # "Large Screen, Small Screen" puts the small screen bottom right, at a fixed 1/4 size.
+    "citra": {"main": {"citra_layout_option": "Single Screen Only", "citra_swap_screen": "Top"},
+              "both": {"citra_layout_option": "Default Top-Bottom Screen"},
+              "corner": {"citra_layout_option": "Large Screen, Small Screen", "citra_swap_screen": "Top"}},
+}
+
+
+def retroarch_config_dir(retroarch: str, ra_cfg: dict) -> Path:
+    """RetroArch's "config" folder, where core options (.opt files) are kept."""
+    configured = ra_cfg.get("rgui_config_directory")
+    if configured and configured != "default":
+        return Path(configured).expanduser()
+    exe_dir = Path(retroarch).expanduser().parent
+    if IS_WINDOWS or (exe_dir / "retroarch.cfg").exists():
+        return exe_dir / "config"
+    return Path.home() / ".config" / "retroarch" / "config"
+
+
+def core_options_file(retroarch: str, ra_cfg: dict, core_name: str, rom_file: Path) -> Path:
+    """The core options file RetroArch will use for this game, in its own order: this
+    game's file, then the content folder's, then the core's (or one file for all cores
+    if "global_core_options" is on)."""
+    folder = retroarch_config_dir(retroarch, ra_cfg) / core_name
+    if ra_cfg.get("game_specific_options", "true") == "true":
+        for name in (rom_file.stem, rom_file.parent.name):
+            if (folder / f"{name}.opt").is_file():
+                return folder / f"{name}.opt"
+    if ra_cfg.get("global_core_options") == "true":
+        configured = ra_cfg.get("core_options_path")
+        if configured:
+            return Path(configured).expanduser()
+        return folder.parent.parent / "retroarch-core-options.cfg"
+    return folder / f"{core_name}.opt"
+
+
+def set_core_options(path: Path, values: dict[str, str]) -> None:
+    """Set some options in a RetroArch options file, leaving every other line as it is."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        lines = []
+    todo = dict(values)
+    for i, line in enumerate(lines):
+        m = re.match(r"^\s*([\w.-]+)\s*=", line)
+        if m and m.group(1) in todo:
+            lines[i] = f'{m.group(1)} = "{todo.pop(m.group(1))}"'
+    lines += [f'{k} = "{v}"' for k, v in todo.items()]
+    _write_new_file(path, ("\n".join(lines) + "\n").encode("utf-8"))
 
 
 # Missing cores are downloaded from libretro's buildbot, where RetroArch's own
@@ -1598,7 +1676,44 @@ class Launcher:
             ok("Save is already up to date.")
         return remote.hash
 
-    def play(self, game: Game, launch: bool = True) -> None:
+    def apply_screen_layout(self, game: Game, core: Path, rom_file: Path, screen: str | None = None) -> None:
+        """For two-screen games: show the main screen only, both, or the main screen with a
+        small touch screen in the corner (where the core can). Asks (default: the choice
+        from last time, else both) unless `screen` is given, then sets the core's options
+        in RetroArch's options file before RetroArch starts."""
+        layouts = SCREEN_LAYOUTS[core_id(core.name)]
+        choices = [c for c in SCREEN_CHOICES if c in layouts]
+        entry = self.state.setdefault(str(game.id), {})
+        last = entry.get("screen_layout") if entry.get("screen_layout") in choices else "both"
+        if screen not in choices:
+            if screen:
+                warn(f"\"{screen}\" isn't available for this core.")
+            print()
+            say("This game has two screens. Which layout?")
+            for n, choice in enumerate(choices, 1):
+                say(f"    {n}  {SCREEN_CHOICES[choice]}{'  (last time)' if choice == last else ''}")
+            numbers = [str(n) for n in range(1, len(choices) + 1)]
+            while True:
+                answer = ask("Layout", str(choices.index(last) + 1))
+                if answer in numbers:
+                    break
+            screen = choices[int(answer) - 1]
+        ra = read_retroarch_cfg(self.config["retroarch"])
+        name = core_display_name(self.config["cores_dir"], core.name, ra.get("libretro_info_path"))
+        if not name:
+            warn("Couldn't tell where this core keeps its options; the layout is unchanged.")
+            return
+        path = core_options_file(self.config["retroarch"], ra, name, rom_file)
+        try:
+            set_core_options(path, layouts[screen])
+        except OSError as exc:
+            warn(f"Couldn't set the screen layout in {path} ({exc}); RetroArch keeps its own setting.")
+            return
+        entry["screen_layout"] = screen
+        save_json(STATE_FILE, self.state)
+        say(dim(f"{SCREEN_CHOICES[screen]}. To change it while playing: F1 → Core Options."))
+
+    def play(self, game: Game, launch: bool = True, screen: str | None = None) -> None:
         print()
         say(bold(f"▶ {game.name}") + dim(f"  ({game.platform_name})"))
         rom_file = self.ensure_rom(game)
@@ -1624,6 +1739,8 @@ class Launcher:
         if not retroarch.is_file():
             fail(f"RetroArch not found at {retroarch}. Fix it with --setup.")
             return
+        if core_id(core.name) in SCREEN_LAYOUTS:
+            self.apply_screen_layout(game, core, rom_file, screen)
         entry = self.state.setdefault(str(game.id), {})
         entry["last_played"] = datetime.now().isoformat(timespec="seconds")
         save_json(STATE_FILE, self.state)
@@ -1762,6 +1879,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--list", action="store_true", help="show your library and exit")
     parser.add_argument("--upload", action="store_true", help="upload this computer's save of a game to RomM")
     parser.add_argument("--no-launch", action="store_true", help="download ROM and save, but don't start RetroArch")
+    parser.add_argument("--screen", choices=("main", "both", "corner"),
+                        help="for two-screen games (DS, 3DS), without asking: main screen only, both "
+                             "screens, or main screen + small touch screen in the bottom-right corner")
     parser.add_argument("--setup", action="store_true", help="change RomM address, login and RetroArch paths")
     parser.add_argument("--paths", "--backups", action="store_true", dest="paths",
                         help="show where settings, ROMs and save backups are kept")
@@ -1819,7 +1939,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             app.upload_now(game)
         else:
-            app.play(game, launch=not args.no_launch)
+            app.play(game, launch=not args.no_launch, screen=args.screen)
         print()
         return 0
     except Quit:

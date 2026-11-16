@@ -10,7 +10,7 @@ go in `CLAUDE.local.md`, which is git-ignored. Nothing personal (server addresse
 usernames) belongs in the committed files.
 
 Usage: `romm_launcher.py` (pick from library), `romm_launcher.py zelda` (straight to a match),
-`--list`, `--upload <game>`, `--no-launch`, `--setup`, `--paths` (alias `--backups`).
+`--list`, `--upload <game>`, `--no-launch`, `--screen main|both|corner`, `--setup`, `--paths` (alias `--backups`).
 First run asks for setup.
 
 Flow when a game is picked:
@@ -75,7 +75,21 @@ Save paths follow RetroArch's own settings, read from `retroarch.cfg` at runtime
 (`savefile_directory` pre-fills setup).
 
 Platforms → cores (`DEFAULT_PLATFORMS`, overridable in config `platforms`):
-n64 → `mupen64plus_next`, gba → `mgba`, nds → `melondsds`, 3ds → `citra`.
+n64 → `mupen64plus_next`, gba → `mgba`, nds and nintendo-dsi → `melondsds`, 3ds and
+new-nintendo-3ds → `citra`.
+
+**Two-screen games.** If the core is in `SCREEN_LAYOUTS` (melondsds, melonds, desmume,
+citra; option names/values checked against each core's source), `Launcher.apply_screen_layout`
+asks before launch: 1 = main screen only, 2 = both, 3 = main + small touch screen in the
+bottom-right corner (`SCREEN_CHOICES`; "corner" only for cores whose code puts it there:
+melonDS DS hybrid-top + `melonds_hybrid_small_screen = "one"` + ratio 3, Citra "Large
+Screen, Small Screen"). Default: the game's last choice (`screen_layout` in state), else
+both; `--screen main|both|corner` skips the question. It writes
+the core option with `set_core_options` (changes only those lines) into the file
+RetroArch will load, found by `core_options_file`: `<config>/<core name>/<rom stem>.opt`,
+then `<content folder>.opt`, then `<core name>.opt` (or the single global file if
+`global_core_options` is on). `<config>` is `rgui_config_directory` from `retroarch.cfg`;
+`<core name>` is `core_display_name` (from the `.info`).
 
 **Missing cores are downloaded automatically** (`Launcher.ensure_core` → `download_core`,
 config `auto_install_cores`, default true) from libretro's buildbot, where RetroArch's own

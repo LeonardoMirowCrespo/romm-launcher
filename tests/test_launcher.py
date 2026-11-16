@@ -589,6 +589,79 @@ if not os.environ.get(L.HOME_ENV):
 check("default ROM folder inside launcher folder", L.roms_root(L.default_config()) == L.APP_HOME / "roms")
 check("absolute ROM folder kept", L.roms_root({"roms_dir": str(tmp / "X")}) == tmp / "X")
 
+# Two-screen games (DS, 3DS): main screen only, or both. Set in RetroArch's core options.
+opts = tmp / "opts" / "x.opt"
+opts.parent.mkdir()
+opts.write_text('a = "1"\n# comment\nmelonds_screen_layout1 = "left-right"\nb = "2"\n')
+L.set_core_options(opts, {"melonds_screen_layout1": "top", "new_key": "v"})
+check("only the chosen options change", opts.read_text() == 'a = "1"\n# comment\nmelonds_screen_layout1 = "top"\nb = "2"\nnew_key = "v"\n')
+
+rcfg = {"rgui_config_directory": str(tmp / "racfg")}
+ds_rom = tmp / "Roms" / "nds" / "Some DS Game.nds"
+core_dir = tmp / "racfg" / "melonDS DS"
+core_dir.mkdir(parents=True)
+check("core's options file by default", L.core_options_file("ra", rcfg, "melonDS DS", ds_rom) == core_dir / "melonDS DS.opt")
+(core_dir / "nds.opt").write_text("")
+check("content folder's file wins", L.core_options_file("ra", rcfg, "melonDS DS", ds_rom) == core_dir / "nds.opt")
+(core_dir / "Some DS Game.opt").write_text("")
+check("this game's file wins", L.core_options_file("ra", rcfg, "melonDS DS", ds_rom) == core_dir / "Some DS Game.opt")
+check("game files ignored when RetroArch ignores them",
+      L.core_options_file("ra", dict(rcfg, game_specific_options="false"), "melonDS DS", ds_rom) == core_dir / "melonDS DS.opt")
+check("one file for all cores", L.core_options_file("ra", dict(rcfg, game_specific_options="false", global_core_options="true",
+      core_options_path=str(tmp / "all.cfg")), "melonDS DS", ds_rom) == tmp / "all.cfg")
+
+# The launcher asks, remembers the answer, and writes RetroArch's option for that core.
+ds = L.Game({"id": 20, "name": "DS Game", "fs_name": "ds.nds", "platform_fs_slug": "nds"}, app.config)
+ds_rom = tmp / "Roms" / "nds" / "ds.nds"
+mel_opt = ra / "config" / "melonDS DS" / "melonDS DS.opt"
+mel_opt.parent.mkdir(parents=True)
+mel_opt.write_text('melonds_screen_layout1 = "top-bottom"\nmelonds_screen_gap = "0"\n')
+mel_core = ra / "cores" / f"melondsds_libretro{L.CORE_EXT}"
+answers = []
+L.input = lambda prompt: answers.pop(0)
+with contextlib.redirect_stdout(io.StringIO()):
+    answers[:] = ["1"]
+    app.apply_screen_layout(ds, mel_core, ds_rom)
+    check("1 = main screen only", 'melonds_screen_layout1 = "top"' in mel_opt.read_text()
+          and 'melonds_screen_gap = "0"' in mel_opt.read_text() and app.state["20"]["screen_layout"] == "main")
+    answers[:] = [""]
+    app.apply_screen_layout(ds, mel_core, ds_rom)
+    check("Enter keeps last time's choice", 'melonds_screen_layout1 = "top"' in mel_opt.read_text())
+    answers[:] = ["x", "2"]
+    app.apply_screen_layout(ds, mel_core, ds_rom)
+    check("2 = both screens (asks again on a wrong answer)", 'melonds_screen_layout1 = "top-bottom"' in mel_opt.read_text()
+          and app.state["20"]["screen_layout"] == "both")
+    answers[:] = []
+    app.apply_screen_layout(ds, mel_core, ds_rom, "main")
+    check("--screen main skips the question", 'melonds_screen_layout1 = "top"' in mel_opt.read_text())
+    tdsx = L.Game({"id": 21, "name": "3DS Game", "fs_name": "z.3ds", "platform_fs_slug": "3ds"}, app.config)
+    app.apply_screen_layout(tdsx, ra / "cores" / f"citra_libretro{L.CORE_EXT}", tmp / "z.3ds", "main")
+    citra_opt = (ra / "config" / "Citra" / "Citra.opt").read_text()
+    check("3DS: Citra single screen, top", 'citra_layout_option = "Single Screen Only"' in citra_opt
+          and 'citra_swap_screen = "Top"' in citra_opt)
+    # 3 = main screen + small touch screen in the bottom-right corner.
+    answers[:] = ["3"]
+    app.apply_screen_layout(ds, mel_core, ds_rom)
+    mel = mel_opt.read_text()
+    check("3 = corner: melonDS DS hybrid, bottom screen only, 3:1", 'melonds_screen_layout1 = "hybrid-top"' in mel
+          and 'melonds_hybrid_small_screen = "one"' in mel and 'melonds_hybrid_ratio = "3"' in mel
+          and app.state["20"]["screen_layout"] == "corner")
+    app.apply_screen_layout(tdsx, ra / "cores" / f"citra_libretro{L.CORE_EXT}", tmp / "z.3ds", "corner")
+    check("3DS corner: Citra large + small screen", 'citra_layout_option = "Large Screen, Small Screen"'
+          in (ra / "config" / "Citra" / "Citra.opt").read_text())
+    # Cores where the corner layout isn't known: only 1 and 2 are offered.
+    (ra / "config" / "DeSmuME").mkdir()
+    shown = io.StringIO()
+    answers[:] = ["3", "1"]
+    with contextlib.redirect_stdout(shown):
+        app.apply_screen_layout(ds, ra / "cores" / f"desmume_libretro{L.CORE_EXT}", ds_rom, "corner")
+    check("no corner choice for DeSmuME", "corner" not in shown.getvalue().split("Which layout?")[1]
+          and 'desmume_screens_layout = "top only"' in (ra / "config" / "DeSmuME" / "DeSmuME.opt").read_text())
+del L.input
+check("DSi and New 3DS are two-screen platforms too",
+      L.core_id(L.load_config()["platforms"]["nintendo-dsi"]["core"]) in L.SCREEN_LAYOUTS
+      and L.core_id(L.load_config()["platforms"]["new-nintendo-3ds"]["core"]) in L.SCREEN_LAYOUTS)
+
 # Offline: only games on this computer are listed.
 off = L.Launcher()
 off.offline = True

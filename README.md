@@ -43,6 +43,7 @@ After that you get a list of your library: type a number or part of a name to pl
 | `romm_launcher.py --list` | Show your library |
 | `romm_launcher.py --upload zelda` | Upload this computer's save of a game to RomM |
 | `romm_launcher.py --no-launch zelda` | Download the ROM and save, but don't start RetroArch |
+| `romm_launcher.py --screen main mario` | DS/3DS: pick the screen layout without asking (`main`, `both` or `corner`) |
 | `romm_launcher.py --setup` | Change the RomM address, login or RetroArch paths |
 | `romm_launcher.py --paths` | Show where settings, ROMs and save backups are kept |
 
@@ -79,14 +80,37 @@ These work out of the box:
 | --- | --- | --- |
 | `n64` | Mupen64Plus-Next | `.srm` |
 | `gba` | mGBA | `.srm` / `.sav` |
-| `nds` | melonDS DS | `.srm` / `.sav` |
-| `3ds` | Citra | Citra's save folder, synced as a `.zip` |
+| `nds`, `nintendo-dsi` | melonDS DS | `.srm` / `.sav` |
+| `3ds`, `new-nintendo-3ds` | Citra | Citra's save folder, synced as a `.zip` |
+
+**Two-screen games (DS, DSi, 3DS):** before the game starts, you choose a layout:
+
+```
+  This game has two screens. Which layout?
+      1  Main screen only
+      2  Both screens  (last time)
+      3  Main screen + small touch screen in the bottom-right corner
+  Layout [2]:
+```
+
+Enter keeps the choice from last time (both screens the first time). The launcher sets
+this in RetroArch's options for the core (melonDS DS, melonDS, DeSmuME or Citra), so you
+can still change it while playing (F1 → Core Options). With "main screen only", games that
+need the touch screen are hard to play; pick 2 or 3 for those.
+
+Choice 3 is offered for melonDS DS and Citra. With melonDS DS the small screen is a third
+of the size of the main one and the whole picture is almost exactly 16:9, so in fullscreen
+on a 16:9 monitor the small screen sits right in the monitor's corner. Citra's small
+screen is a quarter of the size, with thin bars above and below on a 16:9 monitor. You can
+touch the small screen with the mouse.
 
 If a core isn't installed, the launcher downloads it from libretro (the same place
 RetroArch's Core Downloader gets cores) into RetroArch's cores folder and starts the game.
 It never replaces a core you already have. If the download fails, it lists the cores you
 do have and remembers your pick. To turn automatic downloads off, set
-`"auto_install_cores": false` in `config.json`. To add another platform, add it to `platforms` in `config.json`, using the
+`"auto_install_cores": false` in `config.json`.
+
+To add another platform, add it to `platforms` in `config.json`, using the
 platform's folder name in RomM and the core's name without `_libretro.dll`/`.so`:
 
 ```json
