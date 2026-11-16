@@ -84,7 +84,12 @@ asks before launch: 1 = main screen only, 2 = both, 3 = main + small touch scree
 bottom-right corner (`SCREEN_CHOICES`; "corner" only for cores whose code puts it there:
 melonDS DS hybrid-top + `melonds_hybrid_small_screen = "one"` + ratio 3, Citra "Large
 Screen, Small Screen"). Default: the game's last choice (`screen_layout` in state), else
-both; `--screen main|both|corner` skips the question. It writes
+both; `--screen main|both|corner` skips the question. For layouts that show the touch
+screen (both, corner), `TOUCH_CONTROLS` also sets the controller pointer's visibility
+from config `show_touch_pointer` (default true; melonDS DS `melonds_show_cursor`
+timeout/disabled, Citra `citra_render_touchscreen` enabled/disabled, which is off by
+default in Citra, so the pointer is invisible without it) and prints the controls:
+right stick + R2 on melonDS DS, right stick + R3 on Citra. "main" leaves it alone. It writes
 the core option with `set_core_options` (changes only those lines) into the file
 RetroArch will load, found by `core_options_file`: `<config>/<core name>/<rom stem>.opt`,
 then `<content folder>.opt`, then `<core name>.opt` (or the single global file if

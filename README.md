@@ -104,6 +104,12 @@ on a 16:9 monitor the small screen sits right in the monitor's corner. Citra's s
 screen is a quarter of the size, with thin bars above and below on a 16:9 monitor. You can
 touch the small screen with the mouse.
 
+**Touch screen with a controller:** the right stick moves a pointer over the touch screen,
+and a button touches: **R2** on DS (melonDS DS; hold L2 to move faster), **R3** on 3DS
+(Citra). When you pick a layout that shows the touch screen (2 or 3), the launcher prints
+these controls and makes sure the pointer is visible. To hide the pointer instead, set
+`"show_touch_pointer": false` in `config.json`.
+
 If a core isn't installed, the launcher downloads it from libretro (the same place
 RetroArch's Core Downloader gets cores) into RetroArch's cores folder and starts the game.
 It never replaces a core you already have. If the download fails, it lists the cores you

@@ -262,6 +262,7 @@ def default_config() -> dict:
         "saves_dir": str(DEFAULT_RETROARCH.parent / "saves"),
         "sort_saves_by_core": True,
         "auto_install_cores": True,  # download missing cores from libretro
+        "show_touch_pointer": True,  # DS/3DS: show the controller's touch pointer
         "platforms": json.loads(json.dumps(DEFAULT_PLATFORMS)),
     }
 
@@ -555,6 +556,18 @@ SCREEN_LAYOUTS = {
     "citra": {"main": {"citra_layout_option": "Single Screen Only", "citra_swap_screen": "Top"},
               "both": {"citra_layout_option": "Default Top-Bottom Screen"},
               "corner": {"citra_layout_option": "Large Screen, Small Screen", "citra_swap_screen": "Top"}},
+}
+
+
+# Playing the touch screen with a controller (from each core's source): the right stick
+# moves a pointer and a button touches. "pointer" is the core option that shows the
+# pointer: (name, value when shown, value when hidden), set from config
+# "show_touch_pointer" whenever the layout shows the touch screen.
+TOUCH_CONTROLS = {
+    "melondsds": {"pointer": ("melonds_show_cursor", "timeout", "disabled"),
+                  "help": "Touch screen: right stick moves the cursor, R2 touches (hold L2 to move faster)."},
+    "citra": {"pointer": ("citra_render_touchscreen", "enabled", "disabled"),
+              "help": "Touch screen: right stick moves the pointer, R3 touches."},
 }
 
 
@@ -1704,14 +1717,21 @@ class Launcher:
             warn("Couldn't tell where this core keeps its options; the layout is unchanged.")
             return
         path = core_options_file(self.config["retroarch"], ra, name, rom_file)
+        values = dict(layouts[screen])
+        touch = TOUCH_CONTROLS.get(core_id(core.name)) if screen != "main" else None
+        if touch:
+            key, shown, hidden = touch["pointer"]
+            values[key] = shown if self.config.get("show_touch_pointer", True) else hidden
         try:
-            set_core_options(path, layouts[screen])
+            set_core_options(path, values)
         except OSError as exc:
             warn(f"Couldn't set the screen layout in {path} ({exc}); RetroArch keeps its own setting.")
             return
         entry["screen_layout"] = screen
         save_json(STATE_FILE, self.state)
         say(dim(f"{SCREEN_CHOICES[screen]}. To change it while playing: F1 → Core Options."))
+        if touch:
+            say(dim(touch["help"]))
 
     def play(self, game: Game, launch: bool = True, screen: str | None = None) -> None:
         print()

@@ -658,6 +658,31 @@ with contextlib.redirect_stdout(io.StringIO()):
     check("no corner choice for DeSmuME", "corner" not in shown.getvalue().split("Which layout?")[1]
           and 'desmume_screens_layout = "top only"' in (ra / "config" / "DeSmuME" / "DeSmuME.opt").read_text())
 del L.input
+
+# Touch pointer for controllers: shown (config on, the default) or hidden (off) whenever
+# the layout shows the touch screen, and the controls are printed.
+check("touch pointer on by default", L.default_config()["show_touch_pointer"] is True)
+citra_file = ra / "config" / "Citra" / "Citra.opt"
+shown = io.StringIO()
+with contextlib.redirect_stdout(shown):
+    app.apply_screen_layout(tdsx, ra / "cores" / f"citra_libretro{L.CORE_EXT}", tmp / "z.3ds", "both")
+check("3DS: pointer drawn", 'citra_render_touchscreen = "enabled"' in citra_file.read_text())
+check("3DS: controls printed", "right stick moves the pointer, R3 touches" in shown.getvalue())
+app.config["show_touch_pointer"] = False
+with contextlib.redirect_stdout(io.StringIO()):
+    app.apply_screen_layout(ds, mel_core, ds_rom, "corner")
+check("turned off -> pointer hidden", 'melonds_show_cursor = "disabled"' in mel_opt.read_text())
+app.config["show_touch_pointer"] = True
+shown = io.StringIO()
+with contextlib.redirect_stdout(shown):
+    app.apply_screen_layout(ds, mel_core, ds_rom, "main")
+check("main screen only leaves the pointer alone", 'melonds_show_cursor = "disabled"' in mel_opt.read_text()
+      and "touches" not in shown.getvalue())
+shown = io.StringIO()
+with contextlib.redirect_stdout(shown):
+    app.apply_screen_layout(ds, mel_core, ds_rom, "corner")
+check("DS: cursor shown, controls printed", 'melonds_show_cursor = "timeout"' in mel_opt.read_text()
+      and "R2 touches" in shown.getvalue())
 check("DSi and New 3DS are two-screen platforms too",
       L.core_id(L.load_config()["platforms"]["nintendo-dsi"]["core"]) in L.SCREEN_LAYOUTS
       and L.core_id(L.load_config()["platforms"]["new-nintendo-3ds"]["core"]) in L.SCREEN_LAYOUTS)
