@@ -683,6 +683,71 @@ with contextlib.redirect_stdout(shown):
     app.apply_screen_layout(ds, mel_core, ds_rom, "corner")
 check("DS: cursor shown, controls printed", 'melonds_show_cursor = "timeout"' in mel_opt.read_text()
       and "R2 touches" in shown.getvalue())
+# RetroArch from Flathub ("flatpak:org.libretro.RetroArch"), with a fake flatpak command
+# and a fake ~/.var/app.
+FP = L.FLATPAK_RETROARCH
+fp_install = tmp / "flatpak-install"  # what `flatpak info --show-location` reports
+(fp_install / "files" / "share" / "libretro" / "info").mkdir(parents=True)
+(fp_install / "files" / "share" / "libretro" / "info" / "mupen64plus_next_libretro.info").write_text(
+    'corename = "Mupen64Plus-Next"\n')
+L.FLATPAK_APPS = tmp / "var-app"
+fp_home = L.FLATPAK_APPS / "org.libretro.RetroArch" / "config" / "retroarch"
+fp_home.mkdir(parents=True)
+(fp_home / "retroarch.cfg").write_text(
+    'libretro_info_path = "/app/share/libretro/info"\n'
+    f'libretro_directory = "{(fp_home / "cores").as_posix()}"\n'
+    'sort_savefiles_enable = "true"\n')
+FLATPAK = {"installed": True, "calls": []}
+
+
+def fake_run(args, **kw):
+    FLATPAK["calls"].append(args)
+    ok_ = FLATPAK["installed"] and args[:3] == ["flatpak", "info", "--show-location"]
+    return L.subprocess.CompletedProcess(args, 0 if ok_ else 1, stdout=f"{fp_install}\n" if ok_ else "", stderr="")
+
+
+real_run, L.subprocess.run = L.subprocess.run, fake_run
+L._flatpak_locations.clear()
+check("flatpak: app id", L.flatpak_id(FP) == "org.libretro.RetroArch" and L.flatpak_id(str(ra / "retroarch")) is None)
+check("flatpak: started with flatpak run", L.retroarch_command(FP) == ["flatpak", "run", "org.libretro.RetroArch"])
+check("flatpak: settings in ~/.var/app", L.retroarch_home(FP) == fp_home
+      and L.retroarch_config_dir(FP, {}) == fp_home / "config")
+check("flatpak: installed check", L.retroarch_installed(FP))
+fra = L.read_retroarch_cfg(FP)
+check("flatpak: its retroarch.cfg is read", fra["libretro_directory"] == (fp_home / "cores").as_posix())
+check("flatpak: /app paths point into the installed app",
+      Path(fra["libretro_info_path"]) == fp_install / "files" / "share" / "libretro" / "info")
+check("flatpak: core names from the app's .info files",
+      L.core_display_name(str(fp_home / "cores"), "mupen64plus_next", fra["libretro_info_path"]) == "Mupen64Plus-Next")
+check("flatpak config counts as Linux", L.guess_os({"retroarch": FP}) == "linux")
+
+# A whole game start with the Flatpak RetroArch.
+saved_ra = (app.config["retroarch"], app.config["cores_dir"], app.config["saves_dir"])
+app.config.update(retroarch=FP, cores_dir=str(fp_home / "cores"), saves_dir=str(fp_home / "saves"))
+(fp_home / "cores").mkdir()
+(fp_home / "cores" / f"mupen64plus_next_libretro{L.CORE_EXT}").write_bytes(b"core")
+sm64.rom_dest.write_bytes(b"rom")
+sm64_save = sm64.save_path(sm64.rom_dest)
+launched.clear()
+L.subprocess.Popen = FakeRetroArch
+with contextlib.redirect_stdout(io.StringIO()):
+    app.play(sm64)
+L.subprocess.Popen = real_popen
+check("flatpak: game started through flatpak run", launched and launched[0][:4] == ["flatpak", "run", "org.libretro.RetroArch", "-L"]
+      and launched[0][-1] == str(sm64.rom_dest))
+check("flatpak: saves read from ~/.var/app", sm64_save.is_relative_to(fp_home / "saves" / "Mupen64Plus-Next"))
+FLATPAK["installed"] = False
+L._flatpak_locations.clear()
+launched.clear()
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    app.play(sm64)
+check("flatpak not installed: clear message, nothing started", not launched and "flatpak install flathub" in out.getvalue())
+sm64.rom_dest.unlink()
+app.config.update(retroarch=saved_ra[0], cores_dir=saved_ra[1], saves_dir=saved_ra[2])
+L.subprocess.run = real_run
+L._flatpak_locations.clear()
+
 check("DSi and New 3DS are two-screen platforms too",
       L.core_id(L.load_config()["platforms"]["nintendo-dsi"]["core"]) in L.SCREEN_LAYOUTS
       and L.core_id(L.load_config()["platforms"]["new-nintendo-3ds"]["core"]) in L.SCREEN_LAYOUTS)

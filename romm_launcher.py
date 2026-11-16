@@ -87,9 +87,18 @@ KEYRING_SERVICE = "romm-launcher"
 STEAM_RETROARCH = (
     Path.home() / ".steam" / "debian-installation" / "steamapps" / "common" / "RetroArch"
 )
-# Where RetroArch lives by default: the standalone Windows build, or Steam on Linux.
+# RetroArch from Flathub. In config, "retroarch" is then "flatpak:<app id>" instead of a
+# program path; it runs as `flatpak run <app id>`, and keeps its settings, cores and saves
+# in ~/.var/app/<app id>/config/retroarch. It may read the whole computer
+# (--filesystem=host), so ROMs can stay in the launcher's folder.
+FLATPAK_PREFIX = "flatpak:"
+FLATPAK_RETROARCH = "flatpak:org.libretro.RetroArch"
+FLATPAK_APPS = Path.home() / ".var" / "app"
+# Where RetroArch lives by default: the standalone Windows build, or Flatpak on Linux.
 DEFAULT_RETROARCH = (
-    Path("C:/RetroArch-Win64/retroarch.exe") if IS_WINDOWS else STEAM_RETROARCH / "retroarch"
+    "C:/RetroArch-Win64/retroarch.exe" if IS_WINDOWS
+    else "/Applications/RetroArch.app/Contents/MacOS/RetroArch" if sys.platform == "darwin"
+    else FLATPAK_RETROARCH
 )
 CORE_EXT = ".dll" if IS_WINDOWS else ".dylib" if sys.platform == "darwin" else ".so"
 CORE_EXTS = (".dll", ".so", ".dylib")
@@ -257,9 +266,9 @@ def default_config() -> dict:
         "romm_url": "",
         "username": "",
         "roms_dir": "roms",  # relative paths are inside APP_HOME
-        "retroarch": str(DEFAULT_RETROARCH),
-        "cores_dir": str(DEFAULT_RETROARCH.parent / "cores"),
-        "saves_dir": str(DEFAULT_RETROARCH.parent / "saves"),
+        "retroarch": DEFAULT_RETROARCH,
+        "cores_dir": str(retroarch_home(DEFAULT_RETROARCH) / "cores"),
+        "saves_dir": str(retroarch_home(DEFAULT_RETROARCH) / "saves"),
         "sort_saves_by_core": True,
         "auto_install_cores": True,  # download missing cores from libretro
         "show_touch_pointer": True,  # DS/3DS: show the controller's touch pointer
@@ -475,16 +484,67 @@ def installed_cores(cores_dir: Path) -> list[str]:
     )
 
 
+def flatpak_id(retroarch: str) -> str | None:
+    """The Flatpak app id if RetroArch is set to "flatpak:<app id>", else None."""
+    value = str(retroarch)
+    if not value.startswith(FLATPAK_PREFIX):
+        return None
+    return value[len(FLATPAK_PREFIX):].strip() or None
+
+
+_flatpak_locations: dict[str, Path | None] = {}
+
+
+def flatpak_location(app: str) -> Path | None:
+    """Where an installed Flatpak app's files are (its /app is <this>/files), or None if
+    it isn't installed (or there's no flatpak command)."""
+    if app not in _flatpak_locations:
+        try:
+            result = subprocess.run(["flatpak", "info", "--show-location", app],
+                                    capture_output=True, text=True, timeout=30)
+            location = result.stdout.strip() if result.returncode == 0 else ""
+        except (OSError, subprocess.SubprocessError):
+            location = ""
+        _flatpak_locations[app] = Path(location) if location else None
+    return _flatpak_locations[app]
+
+
+def retroarch_home(retroarch: str) -> Path:
+    """RetroArch's own folder: where its retroarch.cfg, cores and saves are by default."""
+    app = flatpak_id(retroarch)
+    if app:
+        return FLATPAK_APPS / app / "config" / "retroarch"
+    return Path(retroarch).expanduser().parent
+
+
+def retroarch_installed(retroarch: str) -> bool:
+    app = flatpak_id(retroarch)
+    return flatpak_location(app) is not None if app else Path(retroarch).expanduser().is_file()
+
+
+def retroarch_command(retroarch: str) -> list[str]:
+    """The command that starts RetroArch (arguments go after it)."""
+    app = flatpak_id(retroarch)
+    return ["flatpak", "run", app] if app else [str(Path(retroarch).expanduser())]
+
+
 def read_retroarch_cfg(retroarch: str) -> dict[str, str]:
     """RetroArch's own settings (retroarch.cfg), so saves go where RetroArch expects them.
 
     The standalone Windows build keeps retroarch.cfg next to retroarch.exe, Linux in
-    ~/.config/retroarch. Paths starting with ":" are relative to RetroArch's folder."""
-    exe_dir = Path(retroarch).expanduser().parent
-    candidates = [exe_dir / "retroarch.cfg"]
-    if os.environ.get("APPDATA"):
-        candidates.append(Path(os.environ["APPDATA"]) / "RetroArch" / "retroarch.cfg")
-    candidates.append(Path.home() / ".config" / "retroarch" / "retroarch.cfg")
+    ~/.config/retroarch, Flatpak in ~/.var/app/<app id>/config/retroarch. Paths starting
+    with ":" are relative to RetroArch's program folder. For Flatpak, paths inside the
+    app (/app/...) are turned into where those files really are on this computer."""
+    app = flatpak_id(retroarch)
+    if app:
+        exe_dir = Path("/app/bin")
+        candidates = [retroarch_home(retroarch) / "retroarch.cfg"]
+    else:
+        exe_dir = Path(retroarch).expanduser().parent
+        candidates = [exe_dir / "retroarch.cfg"]
+        if os.environ.get("APPDATA"):
+            candidates.append(Path(os.environ["APPDATA"]) / "RetroArch" / "retroarch.cfg")
+        candidates.append(Path.home() / ".config" / "retroarch" / "retroarch.cfg")
     for cfg in candidates:
         try:
             text = cfg.read_text(encoding="utf-8", errors="replace")
@@ -494,7 +554,10 @@ def read_retroarch_cfg(retroarch: str) -> dict[str, str]:
         for m in re.finditer(r'^\s*(\w+)\s*=\s*"(.*)"\s*$', text, re.M):
             key, value = m.groups()
             if value.startswith(":"):
-                value = str(exe_dir / value[1:].lstrip("\\/"))
+                value = exe_dir / value[1:].lstrip("\\/")
+                value = value.as_posix() if app else str(value)
+            if app and value.startswith("/app/") and flatpak_location(app):
+                value = str(flatpak_location(app) / "files" / value[len("/app/"):])
             values[key] = value
         return values
     return {}
@@ -576,9 +639,9 @@ def retroarch_config_dir(retroarch: str, ra_cfg: dict) -> Path:
     configured = ra_cfg.get("rgui_config_directory")
     if configured and configured != "default":
         return Path(configured).expanduser()
-    exe_dir = Path(retroarch).expanduser().parent
-    if IS_WINDOWS or (exe_dir / "retroarch.cfg").exists():
-        return exe_dir / "config"
+    home = retroarch_home(retroarch)
+    if IS_WINDOWS or flatpak_id(retroarch) or (home / "retroarch.cfg").exists():
+        return home / "config"
     return Path.home() / ".config" / "retroarch" / "config"
 
 
@@ -1392,8 +1455,10 @@ class Launcher:
         cfg = self.config
         cfg.setdefault(OS_KEY, {})
         retroarch = self.find_retroarch()
-        cfg["retroarch"] = ask("RetroArch program", retroarch)
-        ra_dir = Path(cfg["retroarch"]).parent
+        hint = "" if IS_WINDOWS else " (\"flatpak\" for RetroArch from Flathub)"
+        answer = ask(f"RetroArch program{hint}", retroarch)
+        cfg["retroarch"] = FLATPAK_RETROARCH if answer.strip().lower() == "flatpak" else answer
+        ra_dir = retroarch_home(cfg["retroarch"])
         ra = read_retroarch_cfg(cfg["retroarch"])
         cfg["cores_dir"] = ask("RetroArch cores folder", ra.get("libretro_directory") or str(ra_dir / "cores"))
         saves = ra.get("savefile_directory")
@@ -1412,24 +1477,30 @@ class Launcher:
         self.check_install()
 
     def find_retroarch(self) -> str:
-        current = Path(self.config["retroarch"]).expanduser()
-        if current.is_file():
-            return str(current)
-        for candidate in (
-            DEFAULT_RETROARCH,
-            STEAM_RETROARCH / "retroarch",
-            Path.home() / ".local" / "share" / "Steam" / "steamapps" / "common" / "RetroArch" / "retroarch",
-            Path(shutil.which("retroarch") or "/nonexistent"),
-        ):
-            if candidate.is_file():
-                return str(candidate)
-        return str(current)
+        """The configured RetroArch if it's there, else the first one found: the Windows
+        build, Flatpak (Linux), Steam, or `retroarch` on the PATH."""
+        current = self.config["retroarch"]
+        if retroarch_installed(current):
+            return current
+        candidates = [DEFAULT_RETROARCH]
+        if not IS_WINDOWS:
+            candidates += [FLATPAK_RETROARCH, str(STEAM_RETROARCH / "retroarch"),
+                           str(Path.home() / ".local/share/Steam/steamapps/common/RetroArch/retroarch")]
+        candidates.append(shutil.which("retroarch") or "")
+        for candidate in dict.fromkeys(c for c in candidates if c):
+            if retroarch_installed(candidate):
+                return candidate
+        return current
 
     def check_install(self) -> None:
         """Point out missing RetroArch pieces right away instead of at play time."""
         cfg = self.config
-        if not Path(cfg["retroarch"]).expanduser().is_file():
-            warn(f"RetroArch not found at {cfg['retroarch']}")
+        if not retroarch_installed(cfg["retroarch"]):
+            if flatpak_id(cfg["retroarch"]):
+                warn(f"The Flatpak {flatpak_id(cfg['retroarch'])} isn't installed "
+                     f"(flatpak install flathub {flatpak_id(cfg['retroarch'])}).")
+            else:
+                warn(f"RetroArch not found at {cfg['retroarch']}")
         cores = Path(cfg["cores_dir"]).expanduser()
         for slug, p in cfg["platforms"].items():
             if p.get("core") and not find_core(cores, p["core"]):
@@ -1628,10 +1699,12 @@ class Launcher:
             warn(f"Couldn't download the core automatically: {exc}")
             return None
         ok(f"Core installed: {path}")
-        try:
-            install_core_info(core, core_info_dir(ra, cores_dir), ra)
-        except (CoreInstallError, OSError) as exc:
-            warn(f"Couldn't get the core's .info file ({exc}); RetroArch will still run it.")
+        # The Flatpak ships every core's .info file, inside the app (never write there).
+        if not flatpak_id(self.config["retroarch"]):
+            try:
+                install_core_info(core, core_info_dir(ra, cores_dir), ra)
+            except (CoreInstallError, OSError) as exc:
+                warn(f"Couldn't get the core's .info file ({exc}); RetroArch will still run it.")
         if "steamapps" in str(self.config["retroarch"]).lower():
             say(dim("Tip: with Steam's RetroArch, also install this core as a Steam add-on;"))
             say(dim("Steam may remove cores it didn't install when it checks its files."))
@@ -1755,9 +1828,12 @@ class Launcher:
 
         if not launch:
             return
-        retroarch = Path(self.config["retroarch"]).expanduser()
-        if not retroarch.is_file():
-            fail(f"RetroArch not found at {retroarch}. Fix it with --setup.")
+        retroarch = self.config["retroarch"]
+        if not retroarch_installed(retroarch):
+            if flatpak_id(retroarch):
+                fail(f"The RetroArch Flatpak isn't installed: flatpak install flathub {flatpak_id(retroarch)}")
+            else:
+                fail(f"RetroArch not found at {retroarch}. Fix it with --setup.")
             return
         if core_id(core.name) in SCREEN_LAYOUTS:
             self.apply_screen_layout(game, core, rom_file, screen)
@@ -1770,8 +1846,8 @@ class Launcher:
         say(f"Starting RetroArch. When you're done: {bold('F1 → Close Content')}, then quit RetroArch.")
         try:
             proc = subprocess.Popen(
-                [str(retroarch), "-L", str(core), str(rom_file)],
-                cwd=str(retroarch.parent),
+                retroarch_command(retroarch) + ["-L", str(core), str(rom_file)],
+                cwd=None if flatpak_id(retroarch) else str(Path(retroarch).expanduser().parent),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 # Ctrl+C in this terminal must not kill the game.
@@ -1918,7 +1994,7 @@ def main(argv: list[str] | None = None) -> int:
             ("Settings", CONFIG_FILE),
             ("ROMs", roms_root(cfg)),
             ("Save backups", BACKUP_DIR),
-            ("RetroArch", Path(cfg["retroarch"]).expanduser()),
+            ("RetroArch", " ".join(retroarch_command(cfg["retroarch"]))),
             ("RetroArch saves", Path(cfg["saves_dir"]).expanduser()),
         ):
             print(f"  {label + ':':<17}{path}")

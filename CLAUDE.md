@@ -56,6 +56,16 @@ The top half has **no user interaction**, so it can be imported and tested:
   or `~/.config/retroarch`; values starting with `:` are relative to RetroArch's folder),
   `find_core`, `installed_cores`, `core_id`. Core names in config are OS-neutral
   (`mupen64plus_next`), files are `<id>_libretro.dll/.so/.dylib`.
+- **Linux uses the Flatpak RetroArch by default** (`DEFAULT_RETROARCH`; Windows: the
+  standalone build). Config `retroarch` is then `"flatpak:org.libretro.RetroArch"`
+  (`FLATPAK_RETROARCH`) instead of a program path. Never treat `retroarch` as a path
+  directly; use `retroarch_home` (folder with retroarch.cfg, cores, saves; Flatpak:
+  `~/.var/app/<id>/config/retroarch`), `retroarch_installed` (Flatpak: `flatpak info
+  --show-location` succeeds), `retroarch_command` (`flatpak run <id>`) and `flatpak_id`.
+  The Flatpak has `--filesystem=host`, so ROMs and cores are passed with their normal
+  paths. `read_retroarch_cfg` turns `/app/...` values (e.g. `libretro_info_path`, inside
+  the sandbox) into `<flatpak location>/files/...`; the Flatpak ships all core `.info`
+  files, so `download_core` doesn't add one. Steam and distro builds still work as paths.
 - `RommClient`: RomM REST API over `urllib`, HTTP Basic auth; on a 403 mentioning CSRF it
   switches to an OAuth token from `POST /api/token`.
 - `Game` (dataclass wrapping RomM's ROM dict + config): `platform` (= `platform_fs_slug`),
@@ -193,9 +203,6 @@ when something fails.
 
 ## Ideas / possible next steps
 
-- Flatpak RetroArch on Linux (`flatpak run org.libretro.RetroArch`; config, cores and
-  saves under `~/.var/app/org.libretro.RetroArch/config/retroarch/`). Needs testing on a
-  real Flatpak install, including whether the sandbox can read the ROM folder.
 - A short `romm` command (`~/.local/bin/romm` symlink on Linux, a `.cmd` on Windows).
 - An option to delete downloaded ROMs to free space (they can always be re-downloaded).
 - Use RomM's `device_id` / save-sync features for server-side conflict detection.

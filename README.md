@@ -15,7 +15,9 @@ on another.
 ## What you need
 
 - **Python 3.9 or newer.** On Windows, get it from [python.org](https://www.python.org/downloads/).
-- **RetroArch**. Missing cores are downloaded automatically when you first play a game that needs them.
+- **RetroArch**. On Windows, the standalone build from retroarch.com. On Linux, the
+  **Flatpak** from Flathub (`flatpak install flathub org.libretro.RetroArch`). Missing cores
+  are downloaded automatically when you first play a game that needs them.
 - A **RomM** server (tested with RomM 5.4) and an account on it.
 - Optional: the `keyring` package (`pip install keyring`, or `python3-keyring` on
   Debian/Ubuntu) so your RomM password is remembered securely. Without it you're asked
@@ -152,9 +154,15 @@ You can copy the whole folder to another computer, including between Windows and
   "roms_dir": "roms",
   "platforms": { "...": "..." },
   "windows": { "retroarch": "C:\\RetroArch-Win64\\retroarch.exe", "cores_dir": "...", "saves_dir": "..." },
-  "linux": { "retroarch": "~/.steam/steam/steamapps/common/RetroArch/retroarch", "cores_dir": "...", "saves_dir": "..." }
+  "linux": { "retroarch": "flatpak:org.libretro.RetroArch", "cores_dir": "...", "saves_dir": "..." }
 }
 ```
+
+`"flatpak:org.libretro.RetroArch"` means the Flatpak RetroArch: the launcher starts it with
+`flatpak run org.libretro.RetroArch`, and its cores and saves are in
+`~/.var/app/org.libretro.RetroArch/config/retroarch/`. Setup finds it by itself; you can
+also type `flatpak` when it asks for the RetroArch program. Other Linux builds (Steam,
+your distribution's package) work too: give the path to the `retroarch` program instead.
 
 The first time you start it on a system that has no section yet, it asks only where
 RetroArch is. You can also just install it separately on each computer; the saves meet in
@@ -164,8 +172,6 @@ Set the `ROMM_LAUNCHER_HOME` environment variable to keep the launcher's data in
 
 ## Known limits
 
-- **Flatpak RetroArch** (Linux) isn't supported yet; use the Steam version, the AppImage,
-  or your distribution's package.
 - **macOS** may work but hasn't been tested.
 - One save per game: save states and multiple save slots aren't synced.
 - If you use Steam's RetroArch, turn off Steam Cloud for it so it doesn't fight RomM over
