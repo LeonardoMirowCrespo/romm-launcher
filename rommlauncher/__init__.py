@@ -11,10 +11,10 @@ order things depend on each other:
     config.py          config.json: defaults, per-system sections, migrations
     dualscreen.py      DS/3DS screen layouts and touch-screen controls
     core_downloads.py  downloading missing cores from libretro
-    romm.py            the RomM API client, with its safety lock (read + upload saves only)
+    romm.py            the RomM API client, with its safety lock (read, upload saves, add new ROMs)
     saves.py           save files, 3DS save folders, backups, deciding which save is newer
-    games.py           a game from the library: ROM and save locations, search, covers
-    launcher.py        the launcher: login, library, play (download, sync, run, upload)
+    games.py           a game from the library: ROM and save locations, search, covers, facts
+    launcher.py        the launcher: login, library, play (download, sync, run, upload), add games
     gui.py             the window (--gui)
     cli.py             the command line (main)
 """

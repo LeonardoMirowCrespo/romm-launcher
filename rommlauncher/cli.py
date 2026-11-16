@@ -33,6 +33,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--screen", choices=("main", "both", "corner"),
                         help="for two-screen games (DS, 3DS), without asking: main screen only, both "
                              "screens, or main screen + small touch screen in the bottom-right corner")
+    parser.add_argument("--add", nargs="+", metavar="FILE", type=Path,
+                        help="add game files you own (your own cartridge dumps, homebrew) to RomM")
     parser.add_argument("--gui", action="store_true", help="open the launcher in a window instead of the terminal")
     parser.add_argument("--setup", action="store_true", help="change RomM address, login and RetroArch paths")
     parser.add_argument("--paths", "--backups", action="store_true", dest="paths",
@@ -77,6 +79,18 @@ def main(argv: list[str] | None = None) -> int:
         app.connect()
         host = urllib.parse.urlsplit(app.config["romm_url"]).hostname
         say(dim(f"{'offline' if app.offline else 'connected to ' + str(host)} · {app.config['username']}"))
+        if args.add:
+            if not app.client:
+                fail("Adding games needs a connection to RomM.")
+                return 1
+            missing = [f for f in args.add if not f.is_file()]
+            if missing:
+                fail("Not found: " + ", ".join(str(f) for f in missing))
+                return 1
+            for file in args.add:
+                app.add_rom(file)
+            print()
+            return 0
         games = app.library()
         if app.client:
             app.retry_pending(games)

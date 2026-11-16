@@ -13,7 +13,7 @@ go in `CLAUDE.local.md`, which is git-ignored. Nothing personal (server addresse
 usernames) belongs in the committed files.
 
 Usage: `romm_launcher.py` (pick from library), `romm_launcher.py zelda` (straight to a match),
-`--list`, `--upload <game>`, `--no-launch`, `--screen main|both|corner`, `--gui`, `--setup`, `--paths` (alias `--backups`).
+`--list`, `--upload <game>`, `--add <file>...` (add game files to RomM), `--no-launch`, `--screen main|both|corner`, `--gui`, `--setup`, `--paths` (alias `--backups`).
 First run asks for setup.
 
 Flow when a game is picked:
@@ -34,11 +34,18 @@ Flow when a game is picked:
   available, otherwise it's asked with `getpass` each run and kept in memory only.
 - **Never lose a save.** Anything that overwrites a save backs it up first. A failed upload
   must be loud and leave the local save untouched.
-- **Never delete or change anything on RomM.** The launcher only reads, and uploads saves.
-  `RommClient._check` enforces it on every request: GET only to the RomM server, POST only
-  to the paths and query parameters in `RommClient.ALLOWED_POSTS` (`/api/saves` with
-  `rom_id`/`emulator`, `/api/token`), never DELETE/PUT/PATCH; redirects to other servers
-  are refused. Don't widen that list without a very good reason. An upload replaces
+- **Never delete or change anything on RomM.** The launcher only reads, uploads saves, and
+  (since 2026-11-16, at the user's request) adds new ROM files.
+  `RommClient._check` enforces it on every request: GET only to the RomM server, writes only
+  as listed in `RommClient.ALLOWED_WRITES` (method, path pattern, query parameters, body
+  check): POST `/api/saves` with `rom_id`/`emulator`, POST `/api/token`, the chunked ROM
+  upload (POST `/api/roms/upload/start` with a body of only `filename`, so never `rom_id`,
+  `folder` or `overwrite`; PUT `/api/roms/upload/<uuid>`; POST `.../<uuid>/complete|cancel`
+  without a body), POST `/api/tasks/scan` only as `{"type": "quick", "platforms": [ids]}`,
+  and POST `/api/platforms` only as `{"fs_slug": "<plain slug>"}` (creates a platform the
+  user picked that isn't on their RomM yet; RomM makes the folder and entry).
+  Never DELETE/PATCH; redirects to other servers are refused. Don't widen that list without
+  a very good reason. An upload replaces
   RomM's save of the same name, so `Launcher.backup_romm_copy` downloads and backs up
   that save first (`romm-before-upload`); if that fails, nothing is uploaded.
 - The launcher folder (`romm_launcher.py` + `rommlauncher/`, plus the data) is what gets
@@ -59,10 +66,10 @@ downwards in this list (no import cycles; type-only imports use `TYPE_CHECKING`)
 | `config.py` | `DEFAULT_PLATFORMS`, `MACHINE_KEYS`, `default_config`, `load_config`, `config_for_disk`, `guess_os`, `roms_root`, `migrate_flat_config`, `migrate_legacy_dirs` |
 | `dualscreen.py` | `SCREEN_CHOICES`, `SCREEN_LAYOUTS`, `TOUCH_CONTROLS`, `screen_choices(game)` |
 | `core_downloads.py` | buildbot: `install_core`, `install_core_info`, `core_download_url`, `http_download`, `CoreInstallError` |
-| `romm.py` | `RommClient` (+ safety lock `_check`, `ALLOWED_POSTS`), `RommError`, `LoginError` |
+| `romm.py` | `RommClient` (+ safety lock `_check`, `ALLOWED_WRITES`; `upload_rom`, `start_scan`, `wait_for_task`, `list_platforms`), `RommError`, `LoginError` |
 | `saves.py` | `FileSave`, `FolderSave`, 3DS title ID helpers, `backup_bytes`/`backup_file`, `RemoteSave`, `fetch_remote`, `decide` |
-| `games.py` | `Game`, `index_roms`, `unpack_zip`, `filter_games`, GUI library helpers (`library_filters`, `filter_library`, `local_game_ids`), `fetch_cover` |
-| `launcher.py` | `Launcher` (setup, login, library, picker, `play`, `upload`, `retry_pending`, ...) |
+| `games.py` | `Game`, `index_roms`, `unpack_zip`, `filter_games`, GUI library helpers (`library_filters`, `filter_library`, `local_game_ids`), `fetch_cover`, `ROM_PLATFORMS`/`guess_platform`, `game_facts` |
+| `launcher.py` | `Launcher` (setup, login, library, picker, `play`, `upload`, `retry_pending`, `add_rom`, ...) |
 | `gui.py` | `GuiUI`, `GuiProgress`, `GuiApp`, `run_gui` |
 | `cli.py` | `main()` (argparse; `--gui` goes to `run_gui`) |
 
@@ -127,7 +134,13 @@ on hover/selection, a platform tag over its corner, a details panel with Play / 
 Upload save, `screen_choices` as chips and an info list, and a status bar whose "Activity"
 toggle shows the log, which opens by itself on a failure). Rounded buttons and chips are
 Canvas drawings from `GuiApp.pill` (`.text`, `.invoke()`, `.set_enabled()`); `fit_image`
-scales covers down by a/b fractions to fit whole (Tk has no free scaling without Pillow). It drives
+scales covers down by a/b fractions to fit whole (Tk has no free scaling without Pillow).
+"+ Add game" in the header (only when online) picks files (`add_files` → `Launcher.add_rom`).
+A "Discover" page of free homebrew was built and then removed at the user's request
+(2026-11-16): the user doesn't want a game store / download source in the launcher. The details panel is a scrolling canvas (`details_canvas`;
+`_wheel_area` routes the mouse wheel) and shows `game_facts` + RomM's `summary`. Games
+that RomM only identified by hash (no `igdb_id`, empty `metadatum`, e.g. Ocarina of Time
+3D) have no facts: fix that with RomM's Match, not in the launcher. It drives
 the same `Launcher` (`play(game, launch, screen)`, `upload_now`, `library`,
 `retry_pending`, `auto_setup_retroarch` on first start) on worker threads (`run_task`).
 Tk is only touched on the main thread: `GuiUI` hands calls to `GuiApp.calls` (a queue
@@ -144,7 +157,14 @@ Save paths follow RetroArch's own settings, read from `retroarch.cfg` at runtime
 
 Platforms → cores (`DEFAULT_PLATFORMS`, overridable in config `platforms`):
 n64 → `mupen64plus_next`, gba → `mgba`, nds and nintendo-dsi → `melondsds`, 3ds and
-new-nintendo-3ds → `citra`.
+new-nintendo-3ds → `citra`; since 2026-11-16 also NES/Famicom (fceumm), SNES (snes9x),
+GB/GBC (gambatte), Virtual Boy, Genesis/SMS/Game Gear/SG-1000 (genesis_plus_gx), 32X
+(picodrive), TG16, WonderSwan, Neo Geo Pocket, PSX (pcsx_rearmed, memory card 1 as .srm)
+with `.srm` save sync, and core-only (`save_exts: []`, saves not synced because the core
+keeps them its own way) for Sega CD, TG-CD, Pokémon mini, Atari 2600/7800, Lynx, PSP, DC,
+GameCube, Wii, Saturn, arcade/Neo Geo (fbneo). Core names checked against libretro's
+core-info repo and the buildbot (Windows and Linux); each core's save-folder name is in
+`KNOWN_CORE_FOLDERS` (its `.info` corename).
 
 **Two-screen games.** If the core is in `SCREEN_LAYOUTS` (melondsds, melonds, desmume,
 citra; option names/values checked against each core's source), `Launcher.apply_screen_layout`
@@ -242,6 +262,21 @@ when something fails.
 - `GET /api/saves?rom_id=…` lists saves (`id`, `file_name`, `file_extension`,
   `updated_at`, `download_path`, `missing_from_fs`, `emulator`, …). Fallback for older
   versions: `GET /api/roms/{id}` → `user_saves`.
+- Adding ROMs (RomM 5.4.1, `backend/endpoints/roms/upload.py`): `POST /api/roms/upload/start`
+  with headers `x-upload-platform` (platform id), `x-upload-filename`, `x-upload-total-size`,
+  `x-upload-total-chunks` and an optional JSON body `{"filename": …}` (wins over the Latin-1
+  header) → `{"upload_id": <uuid>}`; a platform-folder upload refuses an existing file name
+  (400 "already exists"). Then `PUT /api/roms/upload/{id}` per chunk (raw body, header
+  `x-chunk-index`, equal chunks of ceil(size/chunks), last shorter, ≤ 64 MB), `POST
+  .../complete` (201), or `.../cancel`. The file is only listed after a scan: `POST
+  /api/tasks/scan` `{"type": "quick", "platforms": [id]}` → `{"task_id": …}`, followed with
+  `GET /api/tasks/{task_id}` (`status` finished/failed/…). Token scopes: `roms.write`,
+  `tasks.run`, `platforms.write`.
+- Platforms: `GET /api/platforms` (this RomM's), `GET /api/platforms/supported` (every
+  platform RomM knows, ~470; the ones not on this RomM have `id: -1`), `POST /api/platforms`
+  `{"fs_slug": …}` creates one (folder + entry, 201 with the platform). The add-game
+  question lists all of them (`Launcher.add_rom`); long choices are searched (`ui.filter_options`,
+  `TerminalUI._choose_by_search`, `GuiApp.ask_from_list`).
 - `GET /api/saves/{id}/content` downloads the raw file. Fallback: the save's
   `download_path`. (Newer RomM can convert saves between cores via a `core` query param.
   Not used yet.)

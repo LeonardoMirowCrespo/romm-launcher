@@ -44,6 +44,26 @@ KNOWN_CORE_FOLDERS = {
     "melonds": "melonDS",
     "desmume": "DeSmuME",
     "citra": "Citra",
+    # from libretro's .info files (corename), for when the .info isn't installed
+    "fceumm": "FCEUmm",
+    "snes9x": "Snes9x",
+    "gambatte": "Gambatte",
+    "mednafen_vb": "Beetle VB",
+    "genesis_plus_gx": "Genesis Plus GX",
+    "picodrive": "PicoDrive",
+    "mednafen_pce_fast": "Beetle PCE Fast",
+    "mednafen_wswan": "Beetle WonderSwan",
+    "mednafen_ngp": "Beetle NeoPop",
+    "pcsx_rearmed": "PCSX-ReARMed",
+    "pokemini": "PokeMini",
+    "stella": "Stella",
+    "prosystem": "ProSystem",
+    "handy": "Handy",
+    "ppsspp": "PPSSPP",
+    "flycast": "Flycast",
+    "dolphin": "Dolphin",
+    "mednafen_saturn": "Beetle Saturn",
+    "fbneo": "FinalBurn Neo",
 }
 
 

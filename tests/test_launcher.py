@@ -12,6 +12,7 @@ import sys
 import subprocess
 import tempfile
 import threading
+import urllib.request
 from datetime import datetime
 from email.parser import BytesParser
 from email.policy import HTTP
@@ -47,10 +48,15 @@ ROMS = [
     {"id": 9, "name": "Pokemon Emerald", "fs_name": "Pokemon - Emerald (U).gba",
      "platform_fs_slug": "gba", "platform_display_name": "Game Boy Advance"},
 ]
-STORE = {"saves": [], "files": {}}
+STORE = {"saves": [], "files": {}, "uploads": {}, "new_roms": {}}
+SUPPORTED = [("snes", "Super Nintendo Entertainment System"), ("nes", "Nintendo Entertainment System"),
+             ("genesis", "Sega Mega Drive/Genesis"), ("psx", "Sony PlayStation"), ("n64", "Nintendo 64")]
+PLATFORMS = [{"id": 1, "fs_slug": "n64", "display_name": "Nintendo 64"},
+             {"id": 2, "fs_slug": "gba", "display_name": "Game Boy Advance"},
+             {"id": 3, "fs_slug": "nds", "display_name": "Nintendo DS"}]
 AUTH = "Basic " + base64.b64encode(b"leo:pw").decode()
 FLAGS = {"old": False, "csrf": False, "fail_upload": False, "fail_save_download": False}
-SEEN = {"rom_downloads": 0, "token": 0, "destructive": 0, "core_downloads": 0}
+SEEN = {"rom_downloads": 0, "token": 0, "destructive": 0, "core_downloads": 0, "scans": 0, "cancels": 0}
 
 
 def make_png(w, h):
@@ -111,6 +117,14 @@ class H(BaseHTTPRequestHandler):
         q = parse_qs(u.query)
         if u.path == "/api/users/me":
             return self.send(200, {"username": "leo"})
+        if u.path == "/api/platforms":
+            return self.send(200, PLATFORMS)
+        if u.path == "/api/platforms/supported":
+            mine = {p["fs_slug"] for p in PLATFORMS}
+            return self.send(200, PLATFORMS + [{"id": -1, "slug": slug, "fs_slug": slug, "name": name}
+                                               for slug, name in SUPPORTED if slug not in mine])
+        if u.path.startswith("/api/tasks/"):
+            return self.send(200, {"task_id": u.path.rsplit("/", 1)[-1], "status": "finished"})
         if u.path == "/api/roms":
             assert q["limit"] == ["10000"], q
             return self.send(200, {"items": ROMS, "total": len(ROMS)})
@@ -146,7 +160,15 @@ class H(BaseHTTPRequestHandler):
         SEEN["destructive"] += 1  # the launcher must never get here
         self.send(405, {"detail": "not allowed"})
 
-    do_DELETE = do_PUT = do_PATCH = refuse_write
+    do_DELETE = do_PATCH = refuse_write
+
+    def do_PUT(self):  # only a chunk of a ROM upload that was started
+        u = urlparse(self.path)
+        upload = STORE["uploads"].get(u.path.rsplit("/", 1)[-1])
+        if not (u.path.startswith("/api/roms/upload/") and upload and self.authed()):
+            return self.refuse_write()
+        upload["chunks"][int(self.headers["x-chunk-index"])] = self.rfile.read(int(self.headers["Content-Length"]))
+        self.send(200, {"received": len(upload["chunks"]), "total": upload["total_chunks"]})
 
     def do_POST(self):
         u = urlparse(self.path)
@@ -162,6 +184,39 @@ class H(BaseHTTPRequestHandler):
             return self.send(403, {"detail": "CSRF token verification failed"})
         if FLAGS["fail_upload"]:
             return self.send(500, {"detail": "disk full"})
+        if u.path == "/api/roms/upload/start":
+            body = json.loads(raw)
+            slug = next(p["fs_slug"] for p in PLATFORMS if p["id"] == int(self.headers["x-upload-platform"]))
+            if (slug, body["filename"]) in STORE["new_roms"] or any(
+                    r["platform_fs_slug"] == slug and r["fs_name"] == body["filename"] for r in ROMS):
+                return self.send(400, {"detail": f"File {body['filename']} already exists"})
+            uid = f"00000000-0000-4000-8000-{len(STORE['uploads']):012d}"
+            STORE["uploads"][uid] = {"name": body["filename"], "slug": slug, "chunks": {},
+                                     "size": int(self.headers["x-upload-total-size"]),
+                                     "total_chunks": int(self.headers["x-upload-total-chunks"])}
+            return self.send(201, {"upload_id": uid})
+        if u.path.startswith("/api/roms/upload/") and u.path.endswith("/complete"):
+            up = STORE["uploads"][u.path.split("/")[-2]]
+            data = b"".join(up["chunks"][i] for i in range(up["total_chunks"]))
+            assert len(data) == up["size"], (len(data), up["size"])
+            STORE["new_roms"][(up["slug"], up["name"])] = data
+            return self.send(201, b"", "text/plain")
+        if u.path.startswith("/api/roms/upload/") and u.path.endswith("/cancel"):
+            SEEN["cancels"] += 1
+            return self.send(204, b"", "text/plain")
+        if u.path == "/api/platforms":
+            slug = json.loads(raw)["fs_slug"]
+            name = dict(SUPPORTED)[slug]
+            PLATFORMS.append({"id": len(PLATFORMS) + 1, "fs_slug": slug, "slug": slug, "display_name": name})
+            return self.send(201, PLATFORMS[-1])
+        if u.path == "/api/tasks/scan":
+            body = json.loads(raw)
+            SEEN["scans"] += 1
+            for (slug, name), data in STORE["new_roms"].items():
+                if not any(r["fs_name"] == name for r in ROMS):
+                    ROMS.append({"id": 100 + len(ROMS), "name": Path(name).stem, "fs_name": name, "fs_size_bytes": len(data),
+                                 "platform_fs_slug": slug, "platform_display_name": slug.upper()})
+            return self.send(200, {"task_id": "scan-1", "status": "queued", "scan": body})
         q = parse_qs(u.query)
         assert u.path == "/api/saves" and q["emulator"][0] in ("mupen64plus_next", "citra"), self.path
         msg = BytesParser(policy=HTTP).parsebytes(
@@ -222,6 +277,29 @@ blocked("upload with autocleanup refused", "POST", "/api/saves", {"rom_id": 7, "
 blocked("upload with overwrite refused", "POST", "/api/saves", {"rom_id": 7, "emulator": "x", "overwrite": "true"})
 blocked("other servers refused", "GET", "http://127.0.0.2:1/api/users/me")
 blocked("redirect to another server refused", "GET", "/redirect-away")
+
+def blocked_body(name, method, path, body):
+    try:
+        c._request(method, path, body=body, content_type="application/json")
+    except romm.RommError as e:
+        return check(name, str(e).startswith("Blocked"))
+    raise SystemExit(f"FAILED: {name} (request was sent)")
+
+
+UID = "00000000-0000-4000-8000-000000000999"
+blocked_body("ROM upload with overwrite refused", "POST", "/api/roms/upload/start",
+             json.dumps({"filename": "x.gba", "overwrite": True}).encode())
+blocked_body("ROM upload into an existing ROM refused", "POST", "/api/roms/upload/start",
+             json.dumps({"filename": "x.gba", "rom_id": 7}).encode())
+blocked_body("full rescan refused", "POST", "/api/tasks/scan", json.dumps({"type": "complete", "platforms": [1]}).encode())
+blocked_body("scan of everything refused", "POST", "/api/tasks/scan", json.dumps({"type": "quick"}).encode())
+blocked_body("platform with more than a folder name refused", "POST", "/api/platforms",
+             json.dumps({"fs_slug": "snes", "name": "x"}).encode())
+blocked_body("platform with a path for a name refused", "POST", "/api/platforms",
+             json.dumps({"fs_slug": "../roms"}).encode())
+blocked_body("PUT outside an upload refused", "PUT", "/api/roms/upload/not-an-upload", b"x")
+blocked_body("POST /api/roms/delete still refused", "POST", "/api/roms/delete", json.dumps({"roms": [7]}).encode())
+blocked_body("PUT /api/roms/{id} still refused", "PUT", "/api/roms/7", b"{}")
 check("redirect within RomM followed", c._json("GET", "/redirect-home")["username"] == "leo")
 check("nothing destructive reached the server", SEEN["destructive"] == 0)
 sub = romm.RommClient("https://romm.example.com/romm/", "a", "b")
@@ -378,6 +456,15 @@ emerald = [g for g in library if g.id == 9][0]
 check("GBA uses mGBA folder", emerald.save_dir() == ra / "saves" / "mGBA")
 cfg3 = config.load_config()
 check("3DS saves are synced", games.Game({"fs_name": "a.3ds", "platform_fs_slug": "3ds", "id": 1}, cfg3).syncs_saves)
+snes_game = games.Game({"fs_name": "Chrono.sfc", "platform_fs_slug": "snes", "id": 2}, cfg3)
+check("SNES: Snes9x, save synced as .srm", snes_game.core == "snes9x" and snes_game.syncs_saves
+      and snes_game.save_path(tmp / "Chrono.sfc") == ra / "saves" / "Snes9x" / "Chrono.srm")
+check("Genesis: Genesis Plus GX folder", games.Game({"fs_name": "s.md", "platform_fs_slug": "genesis", "id": 3}, cfg3)
+      .save_dir() == ra / "saves" / "Genesis Plus GX")
+psp = games.Game({"fs_name": "g.iso", "platform_fs_slug": "psp", "id": 4}, cfg3)
+check("PSP: a core, but its own saves aren't synced", psp.core == "ppsspp" and not psp.syncs_saves)
+check("every platform's core has a save folder name",
+      all(retroarch.core_id(v["core"]) in retroarch.KNOWN_CORE_FOLDERS for v in config.DEFAULT_PLATFORMS.values()))
 
 # Cores: config names are OS-neutral, files are .dll on Windows and .so on Linux.
 check("core_id strips any extension", retroarch.core_id("citra_libretro.dll") == retroarch.core_id("citra_libretro.so") == "citra")
@@ -808,6 +895,28 @@ check("filter: sorted by name", [g.name for g in games.filter_library(library, "
 check("screen choices only for two-screen cores", dualscreen.screen_choices(ds) == ["main", "both", "corner"]
       and dualscreen.screen_choices(oot) == [])
 
+facts = games.game_facts({"metadatum": {"first_release_date": 956793600000, "genres": ["Adventure", "Puzzle"],
+                                         "average_rating": 88.02, "game_modes": ["Single player"]},
+                           "regions": ["USA"]})
+check("game facts from RomM's metadata", facts == [("Released", "2000"), ("Genre", "Adventure, Puzzle"),
+                                                   ("Rating", "88 / 100"), ("Modes", "Single player"), ("Region", "USA")])
+check("no metadata, no facts", games.game_facts({"metadatum": {"genres": [], "first_release_date": None}}) == [])
+check("platform guessed from the file", games.guess_platform("Game (U).Z64") == "n64" and games.guess_platform("x.txt") is None)
+
+opts = [("snes", "Super Nintendo Entertainment System"), ("nes", "Nintendo Entertainment System"),
+        ("n64", "Nintendo 64")]
+check("search: words in any order", [k for k, _ in ui.filter_options(opts, "entertainment super")] == ["snes"])
+check("search: an exact key comes first", [k for k, _ in ui.filter_options(opts, "nes")][0] == "nes")
+many = [(f"p{i}", f"Platform {i}") for i in range(40)] + opts
+answers = ["nintendo", "2"]
+ui.input = lambda prompt: answers.pop(0)
+with contextlib.redirect_stdout(io.StringIO()):
+    check("long choice: search, then pick a number", ui.choose("Which?", many, "Platform", cancel=True) == "nes")
+answers = [""]
+with contextlib.redirect_stdout(io.StringIO()):
+    check("long choice: Enter takes the suggestion", ui.choose("Which?", many, "Platform", default="n64") == "n64")
+del ui.input
+
 now = datetime(2026, 11, 16, 22, 0)
 check("friendly times", [gui.friendly_time(t, now) for t in ("2026-11-16T20:05:13", "2026-11-15 09:30",
                                                               "2026-11-12T10:00:00", "2026-10-03T10:00", "")]
@@ -890,6 +999,22 @@ if window:
           and not window.activity_open)
     window.log("upload failed", "fail")
     check("a failure opens the activity log", window.activity_open)
+    window.select(oot)
+    check("online: the Add game button is there", window.add_button.text.endswith("Add game"))
+
+    def pick_from_list():
+        text, listbox, shown, finish = window.list_dialog
+        text.set("super nintendo")
+        window.list_picked = [label for _, label in shown]
+        finish(True)
+
+    window.root.after(300, pick_from_list)
+    try:
+        got = window.ask_from_list("Platform?", many, default="n64", cancel=True)
+        check("window: long choice searched in a list", got == "snes"
+              and window.list_picked == ["Super Nintendo Entertainment System"])
+    except gui.tk.TclError as exc:  # a hidden window can't always grab the keyboard
+        print(f"skipped: list dialog ({exc})")
     ui.set_ui(ui.TerminalUI())
     window.root.destroy()
 
@@ -897,6 +1022,41 @@ if window:
 off = launcher.Launcher()
 off.offline = True
 check("offline lists local games only", [g.id for g in off.library()] == [7])
+
+# Adding games: chunked upload, quick scan, copy in the ROM folder; never a replace.
+mine = tmp / "My Homebrew.gba"
+mine.write_bytes(bytes(range(256)) * 5000)  # 1.28 MB, three chunks of 0.5 MB
+c.upload_rom(2, mine, chunk_size=1 << 19)
+check("ROM uploaded in equal chunks", STORE["new_roms"][("gba", "My Homebrew.gba")] == mine.read_bytes()
+      and len(STORE["uploads"]["00000000-0000-4000-8000-000000000000"]["chunks"]) == 3)
+try:
+    c.upload_rom(2, mine)
+    raise SystemExit("FAILED: second upload of the same name went through")
+except romm.RommError as e:
+    check("same file name refused by RomM", "already exists" in str(e))
+ROMS[:] = [r for r in ROMS if r["fs_name"] != "My Homebrew.gba"]
+STORE["new_roms"].clear()
+ui.input = lambda prompt: ""  # the platform question: Enter takes the one the .gba suggests
+with contextlib.redirect_stdout(io.StringIO()):
+    added = app.add_rom(mine)
+del ui.input
+check("add_rom: uploaded, scanned, and in the library", added and SEEN["scans"] >= 1
+      and any(r["fs_name"] == "My Homebrew.gba" and r["platform_fs_slug"] == "gba" for r in ROMS))
+check("add_rom: copied into the ROM folder", (config.roms_root(app.config) / "gba" / "My Homebrew.gba").read_bytes()
+      == mine.read_bytes())
+util.save_json(paths.LIBRARY_CACHE, {"roms": ROMS})
+with contextlib.redirect_stdout(io.StringIO()):
+    check("add_rom: already in the library, nothing sent", app.add_rom(mine, platform="gba") is False)
+    check("add_rom: platform RomM doesn't have", app.add_rom(mine, platform="psp") is False)
+
+snes = tmp / "My Game.sfc"
+snes.write_bytes(b"SNES" * 1000)
+ui.input = lambda prompt: ""  # Enter: the platform .sfc suggests (Super Nintendo, not on this RomM yet)
+with contextlib.redirect_stdout(io.StringIO()):
+    added = app.add_rom(snes)
+del ui.input
+check("add_rom: a platform new in your RomM is created first", added
+      and any(p["fs_slug"] == "snes" for p in PLATFORMS) and STORE["new_roms"][("snes", "My Game.sfc")] == snes.read_bytes())
 
 check("still nothing destructive reached the server", SEEN["destructive"] == 0)
 print("\nall tests passed")

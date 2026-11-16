@@ -7,6 +7,7 @@ from __future__ import annotations
 import re
 import zipfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import paths
@@ -205,3 +206,45 @@ def fetch_cover(client: "RommClient", game: Game) -> Path | None:
     tmp.write_bytes(data)
     tmp.replace(dest)
     return dest
+
+
+# ----- adding games and their details ----------------------------------------
+
+ROM_PLATFORMS = {  # file extension → RomM platform (fs_slug), to suggest when adding a game
+    ".nes": "nes", ".sfc": "snes", ".smc": "snes", ".vb": "virtualboy", ".min": "pokemon-mini",
+    ".gb": "gb", ".gbc": "gbc", ".gba": "gba", ".nds": "nds", ".dsi": "nintendo-dsi",
+    ".z64": "n64", ".n64": "n64", ".v64": "n64", ".ndd": "64dd",
+    ".3ds": "3ds", ".cci": "3ds", ".cxi": "3ds", ".cia": "3ds",
+    ".rvz": "ngc", ".gcm": "ngc", ".wbfs": "wii", ".wua": "wiiu", ".wux": "wiiu", ".nsp": "switch", ".xci": "switch",
+    ".md": "genesis", ".gen": "genesis", ".smd": "genesis", ".32x": "sega32", ".sms": "sms", ".gg": "gamegear",
+    ".sg": "sg1000", ".pce": "tg16", ".ws": "wonderswan", ".wsc": "wonderswan-color",
+    ".a26": "atari2600", ".a52": "atari5200", ".a78": "atari7800", ".lnx": "lynx", ".j64": "jaguar",
+    ".col": "colecovision", ".int": "intellivision", ".vec": "vectrex",
+    ".cso": "psp", ".vpk": "psvita", ".d64": "c64", ".t64": "c64", ".adf": "amiga", ".tic": "tic-80",
+}
+
+
+def guess_platform(file_name: str) -> str | None:
+    return ROM_PLATFORMS.get(Path(file_name).suffix.lower())
+
+
+def game_facts(rom: dict) -> list[tuple[str, str]]:
+    """Short facts about a game from RomM's metadata, for the details panel: (label, text)."""
+    meta = rom.get("metadatum") or {}
+    facts = []
+    released = meta.get("first_release_date")
+    if isinstance(released, (int, float)) and released > 0:
+        facts.append(("Released", str(datetime.fromtimestamp(released / 1000, timezone.utc).year)))
+    if meta.get("genres"):
+        facts.append(("Genre", ", ".join(meta["genres"][:3])))
+    rating = meta.get("average_rating")
+    if isinstance(rating, (int, float)) and rating > 0:
+        facts.append(("Rating", f"{round(rating)} / 100"))
+    modes = [m for m in meta.get("game_modes") or [] if m]
+    if modes:
+        facts.append(("Modes", ", ".join(modes[:3])))
+    if meta.get("franchises"):
+        facts.append(("Series", ", ".join(meta["franchises"][:2])))
+    if rom.get("regions"):
+        facts.append(("Region", ", ".join(rom["regions"][:3])))
+    return facts
