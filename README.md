@@ -46,16 +46,20 @@ Opens the launcher as a window, like a game store's library:
 
 - **Sign in** with your RomM address, username and password (the same as in the
   terminal; with `keyring` installed you can have the password remembered).
-- **Your whole RomM library** as covers. Each one says whether the game is **on this
-  computer** or **in the cloud** (downloaded the first time you play it).
-- **Search** at the top, and a sidebar to show **all games**, only the ones **on this
-  computer**, or **one platform** (Nintendo 64, Nintendo DS, …).
-- Click a game for its details: **Play** (or double-click the cover), **Download only**,
-  **Upload save**, and for DS/3DS games the **screen layout**.
-- An activity panel shows what's happening (downloads, save sync, RetroArch running),
-  and questions (like a save that changed in two places) come up as dialogs.
-- **Settings** for RetroArch's location, the ROM folder, automatic core downloads and the
-  touch pointer. On the first start the launcher finds RetroArch by itself.
+- **Your whole RomM library** as covers, with the platform in the corner. Each one says
+  whether the game is **installed** (on this computer) or **in the cloud** (downloaded the
+  first time you play it).
+- **Search** at the top (Ctrl+F; Escape clears it), and chips to show **all games**, only
+  the **installed** ones, or **one platform** (N64, DS, …).
+- Click a game for its details on the right: **Play** (or double-click the cover),
+  **Download only**, **Upload save**, for DS/3DS games the **screens** (main, both, corner),
+  and when you last played and synced. The game you played last is selected at the start.
+- The bar at the bottom shows what's happening (downloads, save sync, RetroArch running);
+  click **Activity** for the full log, which also opens by itself when something fails.
+  Questions (like a save that changed in two places) come up as dialogs.
+- The icons on the left: library, **refresh**, **settings** (RetroArch's location, the ROM
+  folder, automatic core downloads and the touch pointer) and **log out**. On the first
+  start the launcher finds RetroArch by itself.
 
 Covers are downloaded from RomM once and kept in `covers/`. The window needs Tkinter, which
 comes with Python on Windows; on Debian/Ubuntu install `python3-tk`. To start it without a
