@@ -15,7 +15,7 @@ on another.
 ## What you need
 
 - **Python 3.9 or newer.** On Windows, get it from [python.org](https://www.python.org/downloads/).
-- **RetroArch** with the cores for your platforms (Main Menu → Online Updater → Core Downloader).
+- **RetroArch**. Missing cores are downloaded automatically when you first play a game that needs them.
 - A **RomM** server (tested with RomM 5.4) and an account on it.
 - Optional: the `keyring` package (`pip install keyring`, or `python3-keyring` on
   Debian/Ubuntu) so your RomM password is remembered securely. Without it you're asked
@@ -82,8 +82,11 @@ These work out of the box:
 | `nds` | melonDS DS | `.srm` / `.sav` |
 | `3ds` | Citra | Citra's save folder, synced as a `.zip` |
 
-If a core isn't installed, the launcher lists the cores you do have and remembers your
-pick. To add another platform, add it to `platforms` in `config.json`, using the
+If a core isn't installed, the launcher downloads it from libretro (the same place
+RetroArch's Core Downloader gets cores) into RetroArch's cores folder and starts the game.
+It never replaces a core you already have. If the download fails, it lists the cores you
+do have and remembers your pick. To turn automatic downloads off, set
+`"auto_install_cores": false` in `config.json`. To add another platform, add it to `platforms` in `config.json`, using the
 platform's folder name in RomM and the core's name without `_libretro.dll`/`.so`:
 
 ```json

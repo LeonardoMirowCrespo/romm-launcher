@@ -75,8 +75,19 @@ Save paths follow RetroArch's own settings, read from `retroarch.cfg` at runtime
 (`savefile_directory` pre-fills setup).
 
 Platforms → cores (`DEFAULT_PLATFORMS`, overridable in config `platforms`):
-n64 → `mupen64plus_next`, gba → `mgba`, nds → `melondsds`, 3ds → `citra`. If a core is
-missing the launcher lists installed cores and saves the pick.
+n64 → `mupen64plus_next`, gba → `mgba`, nds → `melondsds`, 3ds → `citra`.
+
+**Missing cores are downloaded automatically** (`Launcher.ensure_core` → `download_core`,
+config `auto_install_cores`, default true) from libretro's buildbot, where RetroArch's own
+Core Downloader gets them: `install_core` fetches `<id>_libretro<ext>.zip` from
+`core_updater_buildbot_cores_url` in `retroarch.cfg` (forced to https for
+buildbot.libretro.com; other servers only if https), else
+`BUILDBOT/nightly/<buildbot_platform()>/latest/`. Only that one file is taken from the
+zip, written via `.part` + rename, and an existing core is never replaced.
+`install_core_info` adds the core's `.info` from `assets/frontend/info.zip` into
+`core_info_dir` (`libretro_info_path`), since the `.info` names the save folder. No RomM
+login is sent to these downloads (`http_download` is separate from `RommClient`). If the
+download fails, the launcher lists installed cores and saves the pick, as before.
 
 Two kinds of save (both have `hash()`, `hash_of(data)`, `read()`, `write(data)`, `modified()`,
 `location`, `upload_name`); `Game.save(rom_file)` picks one:

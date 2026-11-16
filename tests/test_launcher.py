@@ -4,7 +4,9 @@ Run:  python3 tests/test_launcher.py
 """
 
 import base64
+import io
 import json
+import zipfile
 import os
 import sys
 import tempfile
@@ -32,7 +34,15 @@ ROMS = [
 STORE = {"saves": [], "files": {}}
 AUTH = "Basic " + base64.b64encode(b"leo:pw").decode()
 FLAGS = {"old": False, "csrf": False, "fail_upload": False, "fail_save_download": False}
-SEEN = {"rom_downloads": 0, "token": 0, "destructive": 0}
+SEEN = {"rom_downloads": 0, "token": 0, "destructive": 0, "core_downloads": 0}
+
+
+def make_zip(files):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for name, data in files.items():
+            z.writestr(name, data)
+    return buf.getvalue()
 
 
 class H(BaseHTTPRequestHandler):
@@ -51,6 +61,20 @@ class H(BaseHTTPRequestHandler):
         return self.headers.get("Authorization") in (AUTH, "Bearer tok")
 
     def do_GET(self):
+        u = urlparse(self.path)
+        if u.path.startswith("/nightly/"):  # stands in for libretro's buildbot
+            SEEN["core_downloads"] += 1
+            name = u.path.rsplit("/", 1)[-1]
+            if name.startswith("nosuchcore"):
+                return self.send(404, b"not found", "text/html")
+            if name.startswith("badzip"):
+                return self.send(200, make_zip({"other/file.dll": b"x"}), "application/zip")
+            return self.send(200, make_zip({name[:-4]: b"CORE:" + name[:-4].encode()}), "application/zip")
+        if u.path == "/assets/frontend/info.zip":
+            return self.send(200, make_zip({
+                "mgba_libretro.info": b'corename = "mGBA"\n',
+                "snes9x_libretro.info": b'corename = "Snes9x"\n',
+            }), "application/zip")
         if not self.authed():
             return self.send(401, {"detail": "no"})
         u = urlparse(self.path)
@@ -340,6 +364,47 @@ check("sorting off -> plain saves folder", oot.save_path(rom_file).parent == ra 
     'sort_savefiles_enable = "true"\nsort_savefiles_by_content_enable = "true"\n', encoding="utf-8"
 )
 check("sort by core + content dir", oot.save_path(rom_file).parent == save_dir / "n64")
+
+# Missing cores are downloaded from libretro's buildbot (a fake one here).
+L.BUILDBOT = base.rstrip("/")
+check("buildbot folder for this computer", L.buildbot_platform() is not None)
+ext = L.CORE_EXT
+check("RetroArch's updater address is used (over https)", L.core_download_url("snes9x", {
+    "core_updater_buildbot_cores_url": "http://buildbot.libretro.com/nightly/windows/x86_64/latest/"})
+    == f"https://buildbot.libretro.com/nightly/windows/x86_64/latest/snes9x_libretro{ext}.zip")
+check("plain-http mirrors are ignored", L.core_download_url("snes9x", {
+    "core_updater_buildbot_cores_url": "http://mirror.example/cores/"})
+    == f"{L.BUILDBOT}/nightly/{L.buildbot_platform()}/latest/snes9x_libretro{ext}.zip")
+
+cores2 = tmp / "cores2"
+app.config["cores_dir"] = str(cores2)
+emerald_core = app.ensure_core(emerald)
+check("missing core downloaded into the cores folder", emerald_core == cores2 / f"mgba_libretro{ext}"
+      and emerald_core.read_bytes() == f"CORE:mgba_libretro{ext}".encode())
+check("its .info file installed too", (cores2 / "mgba_libretro.info").read_text().startswith("corename"))
+check("no leftover .part files", not list(cores2.glob("*.part")))
+downloads = SEEN["core_downloads"]
+check("installed core is reused", app.ensure_core(emerald) == emerald_core and SEEN["core_downloads"] == downloads)
+
+(tmp / "cores3").mkdir()
+(tmp / "cores3" / f"mgba_libretro{ext}").write_bytes(b"mine")
+check("an existing core is never replaced", L.install_core("mgba", tmp / "cores3", {}).read_bytes() == b"mine"
+      and SEEN["core_downloads"] == downloads)
+for bad, why in (("nosuchcore", "answered 404"), ("badzip", "doesn't contain")):
+    try:
+        L.install_core(bad, tmp / "cores4", {})
+        raise SystemExit(f"FAILED: {bad} installed")
+    except L.CoreInstallError as e:
+        check(f"{bad}: clear error, nothing written", why in str(e) and not list((tmp / "cores4").glob("*")))
+
+app.config.update(cores_dir=str(tmp / "cores5"), auto_install_cores=False)
+downloads = SEEN["core_downloads"]
+check("auto_install_cores off -> no download", app.ensure_core(emerald) is None and SEEN["core_downloads"] == downloads)
+app.config.update(cores_dir=str(ra / "cores"), auto_install_cores=True)
+
+L.install_core_info("snes9x", cores2, {})
+check("save folder named from the downloaded .info", L.core_save_folder("S", str(cores2), "snes9x") == str(Path("S") / "Snes9x"))
+check(".info found in RetroArch's info folder", L.core_save_folder("S", str(tmp), "snes9x", str(cores2)) == str(Path("S") / "Snes9x"))
 (ra / "retroarch.cfg").write_text('savefiles_in_content_dir = "true"\n', encoding="utf-8")
 check("saves next to the ROM", oot.save_path(rom_file).parent == rom_file.parent)
 (ra / "retroarch.cfg").unlink()

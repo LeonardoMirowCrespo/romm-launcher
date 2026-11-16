@@ -28,8 +28,10 @@ import argparse
 import base64
 import getpass
 import hashlib
+import io
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -257,6 +259,7 @@ def default_config() -> dict:
         "cores_dir": str(DEFAULT_RETROARCH.parent / "cores"),
         "saves_dir": str(DEFAULT_RETROARCH.parent / "saves"),
         "sort_saves_by_core": True,
+        "auto_install_cores": True,  # download missing cores from libretro
         "platforms": json.loads(json.dumps(DEFAULT_PLATFORMS)),
     }
 
@@ -494,7 +497,7 @@ def read_retroarch_cfg(retroarch: str) -> dict[str, str]:
     return {}
 
 
-def core_save_folder(saves_dir: str, cores_dir: str, core_file: str) -> str:
+def core_save_folder(saves_dir: str, cores_dir: str, core_file: str, info_dir: str | None = None) -> str:
     """The folder RetroArch writes this core's saves into.
 
     RetroArch names it after the core's display name, which is in the core's
@@ -503,6 +506,7 @@ def core_save_folder(saves_dir: str, cores_dir: str, core_file: str) -> str:
     name = None
     base = Path(cores_dir)
     for info in (
+        *([Path(info_dir) / f"{cid}_libretro.info"] if info_dir and info_dir != "default" else []),
         base / f"{cid}_libretro.info",
         base.parent / "info" / f"{cid}_libretro.info",
         Path.home() / ".config" / "retroarch" / "cores" / f"{cid}_libretro.info",
@@ -517,6 +521,146 @@ def core_save_folder(saves_dir: str, cores_dir: str, core_file: str) -> str:
             continue
     name = name or KNOWN_CORE_FOLDERS.get(cid)
     return str(Path(saves_dir) / name) if name else saves_dir
+
+
+# Missing cores are downloaded from libretro's buildbot, where RetroArch's own
+# "Online Updater → Core Downloader" gets them.
+BUILDBOT = "https://buildbot.libretro.com"
+BUILDBOT_HOST = "buildbot.libretro.com"
+MAX_CORE_DOWNLOAD = 300 * 1024 * 1024
+
+
+class CoreInstallError(Exception):
+    pass
+
+
+def buildbot_platform() -> str | None:
+    """The buildbot folder for this system and CPU, e.g. "windows/x86_64"."""
+    machine = platform.machine().lower()
+    if machine in ("amd64", "x86_64", "x64"):
+        arch = "x86_64"
+    elif machine in ("i386", "i686", "x86"):
+        arch = "x86"
+    elif machine in ("aarch64", "arm64"):
+        arch = "arm64" if sys.platform == "darwin" else "aarch64"
+    elif machine.startswith("armv7"):
+        arch = "armhf"
+    else:
+        return None
+    if IS_WINDOWS:
+        return f"windows/{arch}" if arch in ("x86_64", "x86") else None
+    if sys.platform == "darwin":
+        return f"apple/osx/{arch}" if arch in ("x86_64", "arm64") else None
+    return f"linux/{arch}"
+
+
+def _updater_url(configured: str | None) -> str | None:
+    """A download address from retroarch.cfg, if it's usable: libretro's own server is
+    always fetched over https, any other server only if it's already https."""
+    parts = urllib.parse.urlsplit(configured or "")
+    if parts.hostname == BUILDBOT_HOST:
+        return urllib.parse.urlunsplit(("https",) + tuple(parts)[1:]).rstrip("/") + "/"
+    if parts.scheme == "https" and parts.hostname:
+        return configured.rstrip("/") + "/"
+    return None
+
+
+def core_download_url(core: str, ra_cfg: dict) -> str | None:
+    """Where to download a core: the address RetroArch's Core Downloader uses (from
+    retroarch.cfg), else libretro's buildbot for this system. None if there's no build
+    for this kind of computer."""
+    base = _updater_url(ra_cfg.get("core_updater_buildbot_cores_url"))
+    if not base:
+        plat = buildbot_platform()
+        if not plat:
+            return None
+        base = f"{BUILDBOT}/nightly/{plat}/latest/"
+    return f"{base}{core_id(core)}_libretro{CORE_EXT}.zip"
+
+
+def info_download_url(ra_cfg: dict) -> str:
+    base = _updater_url(ra_cfg.get("core_updater_buildbot_assets_url")) or f"{BUILDBOT}/assets/"
+    return f"{base}frontend/info.zip"
+
+
+def http_download(url: str, label: str | None = None, timeout: int = 60) -> bytes:
+    """Download a file (no login is sent), with a progress bar if `label` is given."""
+    req = urllib.request.Request(url, headers={"User-Agent": "romm-launcher"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            total = int(resp.headers.get("Content-Length") or 0) or None
+            progress = Progress(label, total) if label else None
+            chunks, done = [], 0
+            while chunk := resp.read(1 << 16):
+                chunks.append(chunk)
+                done += len(chunk)
+                if done > MAX_CORE_DOWNLOAD:
+                    raise CoreInstallError(f"{url} is unexpectedly large")
+                if progress:
+                    progress(done)
+            if progress:
+                progress.finish()
+            return b"".join(chunks)
+    except urllib.error.HTTPError as exc:
+        raise CoreInstallError(f"{url} answered {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise CoreInstallError(f"can't reach {urllib.parse.urlsplit(url).netloc} ({exc.reason})") from exc
+    except (TimeoutError, OSError) as exc:
+        raise CoreInstallError(f"the download from {url} broke off ({exc})") from exc
+
+
+def _one_file_from_zip(data: bytes, name: str, source: str) -> bytes:
+    """The file `name` from the top level of a zip; nothing else in the zip is used."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            member = next((i for i in zf.infolist() if i.filename == name), None)
+            if member is None:
+                raise CoreInstallError(f"{source} doesn't contain {name}")
+            return zf.read(member)
+    except zipfile.BadZipFile as exc:
+        raise CoreInstallError(f"{source} isn't a valid zip ({exc})") from exc
+
+
+def _write_new_file(dest: Path, body: bytes) -> None:
+    """Write via a temporary file, so a half-written core never exists under its real name."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".part")
+    tmp.write_bytes(body)
+    tmp.replace(dest)
+
+
+def install_core(core: str, cores_dir: Path, ra_cfg: dict, label: str | None = None) -> Path:
+    """Download a core into RetroArch's cores folder and return its path.
+    An existing core file is never replaced."""
+    name = f"{core_id(core)}_libretro{CORE_EXT}"
+    dest = cores_dir / name
+    if dest.exists():
+        return dest
+    url = core_download_url(core, ra_cfg)
+    if not url:
+        raise CoreInstallError(f"libretro has no cores for this kind of computer ({platform.machine()})")
+    _write_new_file(dest, _one_file_from_zip(http_download(url, label), name, url))
+    return dest
+
+
+def core_info_dir(ra_cfg: dict, cores_dir: Path) -> Path:
+    """Where RetroArch looks for core .info files."""
+    configured = ra_cfg.get("libretro_info_path")
+    if configured and configured != "default":
+        return Path(configured).expanduser()
+    return cores_dir.parent / "info" if (cores_dir.parent / "info").is_dir() else cores_dir
+
+
+def install_core_info(core: str, info_dir: Path, ra_cfg: dict) -> Path | None:
+    """Add the core's .info file (its display name, which names its save folder) if it's
+    missing. Returns the new file, or None if it was already there."""
+    name = f"{core_id(core)}_libretro.info"
+    dest = info_dir / name
+    if dest.exists():
+        return None
+    url = info_download_url(ra_cfg)
+    _write_new_file(dest, _one_file_from_zip(http_download(url), name, url))
+    return dest
 
 
 # --------------------------------------------------------------------------
@@ -831,7 +975,9 @@ class Game:
         by_core = ra.get("sort_savefiles_enable")
         by_core = by_core == "true" if by_core else self.config.get("sort_saves_by_core", True)
         if by_core and self.core:
-            folder = Path(core_save_folder(str(folder), self.config["cores_dir"], self.core))
+            folder = Path(core_save_folder(
+                str(folder), self.config["cores_dir"], self.core, ra.get("libretro_info_path")
+            ))
         if rom_file and ra.get("sort_savefiles_by_content_enable") == "true":
             folder = folder / rom_file.parent.name
         return folder
@@ -1352,6 +1498,10 @@ class Launcher:
         found = find_core(cores_dir, core) if core else None
         if found:
             return found
+        if core and self.config.get("auto_install_cores", True):
+            found = self.download_core(game, core, cores_dir)
+            if found:
+                return found
         installed = installed_cores(cores_dir)
         if core:
             warn(f"The core for {game.platform_name} ({core_id(core)}) isn't installed in {cores_dir}.")
@@ -1376,6 +1526,25 @@ class Launcher:
                 self.save_config()
                 ok(f"{game.platform_name} will use {core_id(chosen)} from now on.")
                 return cores_dir / chosen
+
+    def download_core(self, game: Game, core: str, cores_dir: Path) -> Path | None:
+        """Install a missing core from libretro. None (with a warning) if that fails."""
+        ra = read_retroarch_cfg(self.config["retroarch"])
+        say(f"The {game.platform_name} core ({core_id(core)}) isn't installed. Downloading it from libretro…")
+        try:
+            path = install_core(core, cores_dir, ra, label="Downloading core")
+        except (CoreInstallError, OSError) as exc:
+            warn(f"Couldn't download the core automatically: {exc}")
+            return None
+        ok(f"Core installed: {path}")
+        try:
+            install_core_info(core, core_info_dir(ra, cores_dir), ra)
+        except (CoreInstallError, OSError) as exc:
+            warn(f"Couldn't get the core's .info file ({exc}); RetroArch will still run it.")
+        if "steamapps" in str(self.config["retroarch"]).lower():
+            say(dim("Tip: with Steam's RetroArch, also install this core as a Steam add-on;"))
+            say(dim("Steam may remove cores it didn't install when it checks its files."))
+        return path
 
     def mark_synced(self, game: Game, save_hash: str | None, pending: bool = False) -> None:
         entry = self.state.setdefault(str(game.id), {})
