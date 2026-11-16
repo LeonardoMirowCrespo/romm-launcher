@@ -1,0 +1,16 @@
+# The launcher keeps its data next to the script. None of it belongs in git.
+config.json
+config.*.json
+state.json
+library.json
+*.tmp
+*.broken-*
+backups/
+roms/
+
+# Machine-specific notes
+CLAUDE.local.md
+
+# Python
+__pycache__/
+*.pyc
