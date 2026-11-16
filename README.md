@@ -8,7 +8,7 @@ downloads the game, puts your newest save from RomM in place, starts RetroArch, 
 the save back to RomM when you quit. Play on one computer, then carry on from the same save
 on another.
 
-- One Python file, standard library only. Runs on **Windows** and **Linux**.
+- Plain Python, standard library only (nothing to install). Runs on **Windows** and **Linux**.
 - Your saves are never thrown away: anything that gets replaced is backed up first.
 - Works offline with games you've already downloaded; saves upload the next time you're online.
 
@@ -36,11 +36,37 @@ python3 romm_launcher.py
 The first run asks for your RomM address, username and password, and where RetroArch is.
 After that you get a list of your library: type a number or part of a name to play.
 
+## The window (`--gui`)
+
+```bash
+python3 romm_launcher.py --gui
+```
+
+Opens the launcher as a window, like a game store's library:
+
+- **Sign in** with your RomM address, username and password (the same as in the
+  terminal; with `keyring` installed you can have the password remembered).
+- **Your whole RomM library** as covers. Each one says whether the game is **on this
+  computer** or **in the cloud** (downloaded the first time you play it).
+- **Search** at the top, and a sidebar to show **all games**, only the ones **on this
+  computer**, or **one platform** (Nintendo 64, Nintendo DS, …).
+- Click a game for its details: **Play** (or double-click the cover), **Download only**,
+  **Upload save**, and for DS/3DS games the **screen layout**.
+- An activity panel shows what's happening (downloads, save sync, RetroArch running),
+  and questions (like a save that changed in two places) come up as dialogs.
+- **Settings** for RetroArch's location, the ROM folder, automatic core downloads and the
+  touch pointer. On the first start the launcher finds RetroArch by itself.
+
+Covers are downloaded from RomM once and kept in `covers/`. The window needs Tkinter, which
+comes with Python on Windows; on Debian/Ubuntu install `python3-tk`. To start it without a
+terminal window on Windows, use `pythonw romm_launcher.py --gui`.
+
 ## Usage
 
 | Command | What it does |
 | --- | --- |
 | `romm_launcher.py` | Pick a game from your library and play it |
+| `romm_launcher.py --gui` | Open the launcher as a window |
 | `romm_launcher.py zelda` | Play the game matching "zelda" (asks if several match) |
 | `romm_launcher.py --list` | Show your library |
 | `romm_launcher.py --upload zelda` | Upload this computer's save of a game to RomM |
@@ -136,12 +162,14 @@ Everything the launcher keeps is in its own folder, next to the script:
 
 ```
 romm-launcher/
-  romm_launcher.py
+  romm_launcher.py   start the launcher with this
+  rommlauncher/      the launcher's code
   config.json     settings (RomM address, username, RetroArch paths, cores)
   state.json      what was last synced, per game
   library.json    your library, cached for offline play
   backups/        replaced saves
   roms/           downloaded games (RomM has the real copies)
+  covers/         cover art for the window
 ```
 
 You can copy the whole folder to another computer, including between Windows and Linux.
@@ -186,6 +214,28 @@ Set the `ROMM_LAUNCHER_HOME` environment variable to keep the launcher's data in
 - **Where did my save go?** `--paths` shows the folders; `backups/` has the earlier versions.
 
 ## Development
+
+`romm_launcher.py` only starts the launcher; the code is in the `rommlauncher/` package,
+one file per topic:
+
+| File | What's in it |
+| --- | --- |
+| `system.py` | This computer: operating system, core file extension, optional keyring |
+| `paths.py` | Where the launcher's files are (`config.json`, `state.json`, `backups/`, …) |
+| `ui.py` | Messages, questions and progress bars, for the terminal or the window |
+| `util.py` | Small helpers: JSON files, hashes, times, safe file writes |
+| `retroarch.py` | RetroArch on this computer: where it is, `retroarch.cfg`, cores, core options |
+| `config.py` | `config.json`: defaults, per-system sections, moving old settings |
+| `dualscreen.py` | DS/3DS screen layouts and touch-screen controls |
+| `core_downloads.py` | Downloading missing cores from libretro |
+| `romm.py` | The RomM API, with its safety lock (only reads and save uploads) |
+| `saves.py` | Save files, 3DS save folders, backups, deciding which save is newer |
+| `games.py` | A game from the library: ROM and save locations, search, covers |
+| `launcher.py` | Logging in, the library, and playing a game (download, sync, run, upload) |
+| `gui.py` | The window (`--gui`) |
+| `cli.py` | The command line |
+
+You can also start it with `python3 -m rommlauncher`. To run the tests:
 
 ```bash
 python3 tests/test_launcher.py

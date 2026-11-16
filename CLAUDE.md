@@ -1,8 +1,11 @@
 # RomM Launcher
 
-`romm_launcher.py` is a single-file Python **command-line** app for playing games from a
-self-hosted **RomM** library locally in RetroArch, with RomM as the home of the saves.
-It runs on Windows and Linux. (It used to be a Tkinter GUI; replaced by the CLI in Nov 2026.)
+A Python app for playing games from a self-hosted **RomM** library locally in RetroArch,
+with RomM as the home of the saves. It runs on Windows and Linux, in the terminal
+(default) or as a window (`--gui`, Tkinter, a game-store style library; work on the `gui`
+branch since 2026-11-16). `romm_launcher.py` is only the start script; the code is the
+`rommlauncher/` package (split from one file on 2026-11-16, at the user's request, to
+make it easier to read and work on).
 
 It's published as a public GitHub repo; `README.md` is the user-facing guide (keep it in
 step with behaviour changes). Notes about a particular setup (RomM address, PCs, paths)
@@ -10,7 +13,7 @@ go in `CLAUDE.local.md`, which is git-ignored. Nothing personal (server addresse
 usernames) belongs in the committed files.
 
 Usage: `romm_launcher.py` (pick from library), `romm_launcher.py zelda` (straight to a match),
-`--list`, `--upload <game>`, `--no-launch`, `--screen main|both|corner`, `--setup`, `--paths` (alias `--backups`).
+`--list`, `--upload <game>`, `--no-launch`, `--screen main|both|corner`, `--gui`, `--setup`, `--paths` (alias `--backups`).
 First run asks for setup.
 
 Flow when a game is picked:
@@ -38,16 +41,46 @@ Flow when a game is picked:
   are refused. Don't widen that list without a very good reason. An upload replaces
   RomM's save of the same name, so `Launcher.backup_romm_copy` downloads and backs up
   that save first (`romm-before-upload`); if that fails, nothing is uploaded.
-- Must stay a single file that can be copied between machines (Windows and Linux).
+- The launcher folder (`romm_launcher.py` + `rommlauncher/`, plus the data) is what gets
+  copied between machines (Windows and Linux), so keep everything inside it.
 
-## Code layout (`romm_launcher.py`)
+## Code layout (`rommlauncher/`)
 
-The top half has **no user interaction**, so it can be imported and tested:
+One module per topic; `rommlauncher/__init__.py` has the same map. Dependencies only go
+downwards in this list (no import cycles; type-only imports use `TYPE_CHECKING`):
 
-- Terminal helpers: `say/ok/warn/fail`, `ask`, `ask_yes`, `Progress`. `Quit` is raised on
-  q / Ctrl+C / Ctrl+D at a prompt.
-- Folders: `APP_HOME` (see "Files on disk"); `migrate_legacy_dirs()` is called from
-  `main()` and leaves things in place if a file is in use.
+| Module | Contents |
+| --- | --- |
+| `system.py` | `APP_NAME`, `IS_WINDOWS`, `OS_KEY`/`OS_KEYS`/`OS_NAMES`, `CORE_EXT(S)`, optional `keyring` (`HAVE_KEYRING`) |
+| `paths.py` | `APP_HOME` and the data files (`CONFIG_FILE`, `STATE_FILE`, `LIBRARY_CACHE`, `BACKUP_DIR`, `COVER_DIR`), `OLD_LOCATIONS` |
+| `ui.py` | `TerminalUI`, `set_ui`, `say/ok/warn/fail`, `ask`, `ask_yes`, `choose`, `progress_bar`, `Progress`, `Quit`, colours, `human_size` |
+| `util.py` | `load_json`, `save_json`, `sha256`, `file_hash`, `parse_time`, `fmt_time`, `write_new_file` |
+| `retroarch.py` | Flatpak/Steam/default RetroArch, `read_retroarch_cfg`, `core_id`, `find_core`, `installed_cores`, `core_display_name`, `core_save_folder`, `KNOWN_CORE_FOLDERS`, core options (`retroarch_config_dir`, `core_options_file`, `set_core_options`) |
+| `config.py` | `DEFAULT_PLATFORMS`, `MACHINE_KEYS`, `default_config`, `load_config`, `config_for_disk`, `guess_os`, `roms_root`, `migrate_flat_config`, `migrate_legacy_dirs` |
+| `dualscreen.py` | `SCREEN_CHOICES`, `SCREEN_LAYOUTS`, `TOUCH_CONTROLS`, `screen_choices(game)` |
+| `core_downloads.py` | buildbot: `install_core`, `install_core_info`, `core_download_url`, `http_download`, `CoreInstallError` |
+| `romm.py` | `RommClient` (+ safety lock `_check`, `ALLOWED_POSTS`), `RommError`, `LoginError` |
+| `saves.py` | `FileSave`, `FolderSave`, 3DS title ID helpers, `backup_bytes`/`backup_file`, `RemoteSave`, `fetch_remote`, `decide` |
+| `games.py` | `Game`, `index_roms`, `unpack_zip`, `filter_games`, GUI library helpers (`library_filters`, `filter_library`, `local_game_ids`), `fetch_cover` |
+| `launcher.py` | `Launcher` (setup, login, library, picker, `play`, `upload`, `retry_pending`, ...) |
+| `gui.py` | `GuiUI`, `GuiProgress`, `GuiApp`, `run_gui` |
+| `cli.py` | `main()` (argparse; `--gui` goes to `run_gui`) |
+
+**Names that tests replace at runtime** (`paths.*`, `system.OS_KEY`, `retroarch.FLATPAK_APPS`,
+`core_downloads.BUILDBOT`, `ui.input`) must be read as `paths.CONFIG_FILE`,
+`system.OS_KEY`, ... from other modules, never `from .paths import CONFIG_FILE`, or the
+replacement isn't seen.
+
+Everything up to `games.py` has **no user interaction**, so it can be imported and tested.
+
+- Talking to the player: `say/ok/warn/fail`, `ask`, `ask_yes`, `choose` (pick one of
+  (key, label) options), `progress_bar`. They all go to the `UI` object: `TerminalUI` by
+  default (prints, `input()`, `Progress`), or the GUI's `GuiUI` (`set_ui`). So Launcher
+  code never prints questions or reads input itself; new questions use `choose`/`ask`.
+  `Quit` is raised on q / Ctrl+C / Ctrl+D at a prompt (or Cancel in a GUI dialog).
+- Folders: `paths.APP_HOME` (see "Files on disk"; the folder above the package);
+  `migrate_legacy_dirs()` is called from `main()` and leaves things in place if a file is
+  in use.
 - Config and state: `load_config` (merges `DEFAULT_PLATFORMS`, drops
   `OLD_PLATFORM_DEFAULTS`, applies this system's section), `config_for_disk` (what
   `Launcher.save_config` writes), `migrate_flat_config`, `load_json`, `save_json`, `backup_bytes`/`backup_file`,
@@ -79,6 +112,23 @@ The top half has **no user interaction**, so it can be imported and tested:
 `retry_pending`); `main()` is the argparse entry point. RetroArch runs via `subprocess.Popen`
 in its own session / process group (`CREATE_NEW_PROCESS_GROUP` on Windows) so Ctrl+C in
 the terminal doesn't kill the game.
+
+**The GUI** (`gui.py`: `run_gui`, `--gui`). Tkinter is imported at the top of `gui.py`
+in a try (`HAVE_TK`), so the CLI works without it. `GuiApp` builds a
+login screen (`show_login`: RomM address, username, password, keyring checkbox, "Play
+offline" if `library.json` exists) and the library screen (`show_library`: top bar with
+search, sidebar from `library_filters`, a cover grid on a Canvas filtered by
+`filter_library`, a details panel with Play / Download only / Upload save and the
+`screen_choices` radio buttons, an activity log, a status bar with progress). It drives
+the same `Launcher` (`play(game, launch, screen)`, `upload_now`, `library`,
+`retry_pending`, `auto_setup_retroarch` on first start) on worker threads (`run_task`).
+Tk is only touched on the main thread: `GuiUI` hands calls to `GuiApp.calls` (a queue
+emptied by `_pump` every 50 ms) and waits for answers to questions. Covers come from
+RomM's `path_cover_small` via `fetch_cover` (`RommClient.download_asset`, a GET, so the
+safety lock allows it) into `covers/<rom id>.png`; only PNG/GIF are kept (Tk can't show
+JPEG without Pillow), others get a coloured placeholder. Pixel sizes go through
+`GuiApp.S()` for high-DPI screens. The tests drive a real (hidden) window when a display
+is available.
 
 Save paths follow RetroArch's own settings, read from `retroarch.cfg` at runtime:
 `sort_savefiles_enable`, `sort_savefiles_by_content_enable`, `savefiles_in_content_dir`
@@ -137,13 +187,14 @@ prints it all.
 
 ```
 romm-launcher/
-  romm_launcher.py, tests/, CLAUDE.md, .gitignore   the code (in git)
+  romm_launcher.py, rommlauncher/, tests/, README.md, CLAUDE.md, LICENSE, .gitignore   the code (in git)
   CLAUDE.local.md  notes about your own setup (git-ignored)
   config.json      RomM URL, username, ROM folder, platform cores; RetroArch paths per system (mode 600)
   state.json       per RomM ROM id: last synced hash/time, last_played, pending_upload
   library.json     cached library, for offline play
   backups/<rom_id>/  last 20 replaced saves (3DS saves as .zip)
   roms/<platform>/   downloaded ROMs (cache; RomM has the real copies)
+  covers/          cover art for the GUI, <rom id>.png (cache)
 ```
 
 `roms_dir` in config is relative to `APP_HOME` (default `"roms"`; resolve it with
@@ -197,8 +248,11 @@ when something fails.
   download-ROM → place-save → upload flow (`play(..., launch=False)`), 3DS folder saves,
   `retroarch.cfg` handling and folder migration against a fake RomM HTTP server, in a temp
   folder. Run it after any change, and add cases for new behaviour.
-  (On Windows set `PYTHONIOENCODING=utf-8`.)
-- `python3 -m py_compile romm_launcher.py` for a quick syntax check.
+  (On Windows set `PYTHONIOENCODING=utf-8`.) It imports the package's modules by name
+  (`from rommlauncher import config, games, ...`) and swaps things like `paths.CONFIG_FILE`
+  or `system.OS_KEY` on those modules. It also drives a hidden GUI window when a display
+  is available.
+- `python3 -m py_compile romm_launcher.py rommlauncher/*.py` for a quick syntax check.
 - Launching RetroArch has no automated test. Test it by running the script for real.
 
 ## Ideas / possible next steps
