@@ -1,0 +1,643 @@
+"""The launcher itself: login, the library, playing a game (download the ROM, sync the
+save, start RetroArch, upload the save), and setup. Used by both the terminal (cli)
+and the window (gui); it talks to the player only through `ui`.
+"""
+
+from __future__ import annotations
+
+import getpass
+import re
+import shutil
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from . import paths
+from . import system
+from .config import config_for_disk, load_config, roms_root
+from .core_downloads import CoreInstallError, core_info_dir, install_core, install_core_info
+from .dualscreen import SCREEN_CHOICES, SCREEN_LAYOUTS, TOUCH_CONTROLS
+from .games import Game, filter_games, index_roms, unpack_zip
+from .retroarch import (
+    DEFAULT_RETROARCH,
+    FLATPAK_RETROARCH,
+    STEAM_RETROARCH,
+    core_display_name,
+    core_id,
+    core_options_file,
+    find_core,
+    flatpak_id,
+    installed_cores,
+    read_retroarch_cfg,
+    retroarch_command,
+    retroarch_home,
+    retroarch_installed,
+    set_core_options,
+)
+from .romm import LoginError, RommClient, RommError
+from .saves import backup_bytes, decide, fetch_remote
+from .system import HAVE_KEYRING, IS_WINDOWS, KEYRING_SERVICE, keyring
+from .ui import (
+    Quit,
+    ask,
+    ask_yes,
+    bold,
+    choose,
+    dim,
+    fail,
+    green,
+    human_size,
+    ok,
+    progress_bar,
+    red,
+    say,
+    warn,
+)
+from .util import fmt_time, load_json, save_json
+
+if TYPE_CHECKING:
+    from .saves import FileSave, FolderSave
+
+
+class Launcher:
+    def __init__(self):
+        self.config = load_config()
+        self.state = load_json(paths.STATE_FILE, {})
+        self.client: RommClient | None = None
+        self.offline = False
+
+    # ----- setup and login --------------------------------------------
+
+    def save_config(self) -> None:
+        save_json(paths.CONFIG_FILE, config_for_disk(self.config))
+
+    def needs_setup(self) -> bool:
+        return not paths.CONFIG_FILE.exists() or not self.config.get("username") or not self.config.get("romm_url")
+
+    def needs_retroarch_setup(self) -> bool:
+        """True when config.json came from another system and has no paths for this one."""
+        return system.OS_KEY not in self.config
+
+    def setup(self) -> None:
+        cfg = self.config
+        print()
+        say(bold("Setup") + dim("  (press Enter to keep the value in [brackets])"))
+        print()
+        url = ask("RomM address (e.g. https://romm.example.com)", cfg["romm_url"]).rstrip("/")
+        while not url:
+            url = ask("RomM address (required)").rstrip("/")
+        if not re.match(r"^https?://", url):
+            url = "https://" + url
+        cfg["romm_url"] = url
+        cfg["username"] = ask("RomM username", cfg["username"])
+        while not cfg["username"]:
+            cfg["username"] = ask("RomM username (required)")
+        password = self.ask_password(force=True)
+        client = RommClient(cfg["romm_url"], cfg["username"], password, timeout=15)
+        try:
+            user = client.check_login()
+            ok(f"Connected to RomM as {bold(user)}.")
+            self.client = client
+        except RommError as exc:
+            fail(str(exc))
+            if not ask_yes("Save these settings anyway?", default=False):
+                raise Quit
+        if HAVE_KEYRING:
+            if ask_yes("Remember the password in your system keyring?"):
+                try:
+                    keyring.set_password(KEYRING_SERVICE, cfg["username"], password)
+                except Exception as exc:  # noqa: BLE001
+                    warn(f"Could not use the keyring ({exc}); you'll be asked each time.")
+        else:
+            say(dim("Tip: install python3-keyring and the password is remembered securely."))
+
+        print()
+        current = roms_root(cfg)
+        answer = ask("Folder for ROMs", str(current))
+        if Path(answer).expanduser() != current:
+            here = cfg.setdefault(system.OS_KEY, {})
+            if Path(answer).expanduser().is_absolute():
+                here["roms_dir"] = answer  # a full path only makes sense on this system
+            else:
+                here.pop("roms_dir", None)
+                cfg["roms_dir"] = answer
+        self.setup_retroarch()
+
+    def setup_retroarch(self) -> None:
+        """Ask for RetroArch's paths on this system and save them in its section."""
+        cfg = self.config
+        cfg.setdefault(system.OS_KEY, {})
+        retroarch = self.find_retroarch()
+        hint = "" if IS_WINDOWS else " (\"flatpak\" for RetroArch from Flathub)"
+        answer = ask(f"RetroArch program{hint}", retroarch)
+        cfg["retroarch"] = FLATPAK_RETROARCH if answer.strip().lower() == "flatpak" else answer
+        ra_dir = retroarch_home(cfg["retroarch"])
+        ra = read_retroarch_cfg(cfg["retroarch"])
+        cfg["cores_dir"] = ask("RetroArch cores folder", ra.get("libretro_directory") or str(ra_dir / "cores"))
+        saves = ra.get("savefile_directory")
+        cfg["saves_dir"] = ask(
+            "RetroArch saves folder",
+            saves if saves and saves != "default" else str(ra_dir / "saves"),
+        )
+        if not ra.get("sort_savefiles_enable"):
+            cfg["sort_saves_by_core"] = ask_yes(
+                "Is RetroArch's \"Sort Saves into Folders by Core Name\" setting on?",
+                cfg["sort_saves_by_core"],
+            )
+        self.save_config()
+        print()
+        ok(f"Settings saved to {paths.CONFIG_FILE}")
+        self.check_install()
+
+    def auto_setup_retroarch(self) -> bool:
+        """Set RetroArch's paths for this system without asking (the GUI's first start):
+        the RetroArch found by find_retroarch, folders from its retroarch.cfg.
+        Returns whether RetroArch was found."""
+        cfg = self.config
+        cfg.setdefault(system.OS_KEY, {})
+        cfg["retroarch"] = self.find_retroarch()
+        ra = read_retroarch_cfg(cfg["retroarch"])
+        home = retroarch_home(cfg["retroarch"])
+        cores = ra.get("libretro_directory")
+        cfg["cores_dir"] = cores if cores and cores != "default" else str(home / "cores")
+        saves = ra.get("savefile_directory")
+        cfg["saves_dir"] = saves if saves and saves != "default" else str(home / "saves")
+        if ra.get("sort_savefiles_enable"):
+            cfg["sort_saves_by_core"] = ra["sort_savefiles_enable"] == "true"
+        self.save_config()
+        return retroarch_installed(cfg["retroarch"])
+
+    def find_retroarch(self) -> str:
+        """The configured RetroArch if it's there, else the first one found: the Windows
+        build, Flatpak (Linux), Steam, or `retroarch` on the PATH."""
+        current = self.config["retroarch"]
+        if retroarch_installed(current):
+            return current
+        candidates = [DEFAULT_RETROARCH]
+        if not IS_WINDOWS:
+            candidates += [FLATPAK_RETROARCH, str(STEAM_RETROARCH / "retroarch"),
+                           str(Path.home() / ".local/share/Steam/steamapps/common/RetroArch/retroarch")]
+        candidates.append(shutil.which("retroarch") or "")
+        for candidate in dict.fromkeys(c for c in candidates if c):
+            if retroarch_installed(candidate):
+                return candidate
+        return current
+
+    def check_install(self) -> None:
+        """Point out missing RetroArch pieces right away instead of at play time."""
+        cfg = self.config
+        if not retroarch_installed(cfg["retroarch"]):
+            if flatpak_id(cfg["retroarch"]):
+                warn(f"The Flatpak {flatpak_id(cfg['retroarch'])} isn't installed "
+                     f"(flatpak install flathub {flatpak_id(cfg['retroarch'])}).")
+            else:
+                warn(f"RetroArch not found at {cfg['retroarch']}")
+        cores = Path(cfg["cores_dir"]).expanduser()
+        for slug, p in cfg["platforms"].items():
+            if p.get("core") and not find_core(cores, p["core"]):
+                warn(f"{slug.upper()} core not installed yet: {core_id(p['core'])} (you'll be asked when you play)")
+
+    def ask_password(self, force: bool = False) -> str:
+        user = self.config["username"]
+        if not force and HAVE_KEYRING:
+            try:
+                stored = keyring.get_password(KEYRING_SERVICE, user)
+                if stored:
+                    return stored
+            except Exception:  # noqa: BLE001 - keyring backend trouble
+                pass
+        try:
+            pw = getpass.getpass(f"  RomM password for {user}: ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            raise Quit
+        if not pw:
+            raise Quit
+        return pw
+
+    def forget_password(self) -> None:
+        if HAVE_KEYRING:
+            try:
+                keyring.delete_password(KEYRING_SERVICE, self.config["username"])
+            except Exception:  # noqa: BLE001
+                pass
+
+    def connect(self) -> None:
+        """Log in to RomM. On a network problem, offer to continue offline."""
+        if self.client:
+            return
+        for attempt in range(3):
+            client = RommClient(self.config["romm_url"], self.config["username"], self.ask_password(force=attempt > 0), timeout=15)
+            try:
+                client.check_login()
+                self.client = client
+                return
+            except LoginError as exc:
+                fail(str(exc))
+                self.forget_password()
+            except RommError as exc:
+                fail(str(exc))
+                if paths.LIBRARY_CACHE.exists() and ask_yes(
+                    "Continue offline? (games already on this computer only; saves sync next time)"
+                ):
+                    self.offline = True
+                    return
+                raise Quit
+        raise Quit
+
+    # ----- library ------------------------------------------------------
+
+    def library(self) -> list[Game]:
+        if self.client:
+            say(dim("Loading your library…"))
+            roms = self.client.list_roms()
+            save_json(paths.LIBRARY_CACHE, {"roms": roms, "fetched_at": datetime.now().isoformat()})
+        else:
+            roms = load_json(paths.LIBRARY_CACHE, {"roms": []})["roms"]
+        games = [Game(r, self.config) for r in roms if r.get("fs_name")]
+        if self.offline:
+            index = index_roms(roms_root(self.config))
+            games = [g for g in games if g.find_local_rom(index)]
+        return games
+
+    def last_played(self, game: Game) -> str:
+        return self.state.get(str(game.id), {}).get("last_played", "")
+
+    def print_games(self, games: list[Game], numbered: list[Game]) -> None:
+        index = index_roms(roms_root(self.config))
+        width = min(max((len(g.name) for g in games), default=20), 52)
+
+        def row(g: Game) -> None:
+            numbered.append(g)
+            here = green("● on this computer") if g.find_local_rom(index) else dim("○ will download")
+            name = g.name if len(g.name) <= width else g.name[: width - 1] + "…"
+            say(f"{len(numbered):>4}  {name:<{width}}  {here}")
+
+        recent = sorted((g for g in games if self.last_played(g)), key=self.last_played, reverse=True)[:3]
+        if recent and len(games) > 5:
+            print()
+            say(bold("Continue playing"))
+            for g in recent:
+                row(g)
+        by_platform: dict[str, list[Game]] = {}
+        for g in games:
+            if g not in recent or len(games) <= 5:
+                by_platform.setdefault(g.platform_name, []).append(g)
+        for platform in sorted(by_platform):
+            print()
+            say(bold(platform))
+            for g in sorted(by_platform[platform], key=lambda g: g.name.lower()):
+                row(g)
+
+    def pick_game(self, games: list[Game], query: str | None) -> Game | None:
+        if not games:
+            fail("Your RomM library is empty." if not self.offline else "No games on this computer yet.")
+            return None
+        while True:
+            shown = filter_games(games, query) if query else games
+            if query and not shown:
+                warn(f"Nothing matches “{query}”.")
+                query, shown = None, games
+            elif query and len(shown) == 1:
+                return shown[0]
+            numbered: list[Game] = []
+            self.print_games(shown, numbered)
+            print()
+            hint = "Type a number to play, or a few letters to search"
+            hint += ". Enter shows everything, q quits." if query else ". q quits."
+            say(dim(hint))
+            answer = ask(">")
+            if answer.lower() in ("q", "quit", "exit"):
+                return None
+            if answer.isdigit():
+                n = int(answer)
+                if 1 <= n <= len(numbered):
+                    return numbered[n - 1]
+                warn(f"Pick a number from 1 to {len(numbered)}.")
+                continue
+            query = answer or None
+
+    # ----- play -----------------------------------------------------------
+
+    def ensure_rom(self, game: Game) -> Path | None:
+        local = game.find_local_rom()
+        if local:
+            ok(f"ROM: {local}")
+            return local
+        if not self.client:
+            fail("The ROM isn't on this computer, and RomM can't be reached to download it.")
+            return None
+        size = game.rom.get("fs_size_bytes")
+        say(f"The ROM isn't on this computer yet. Downloading {human_size(size) if size else ''}…")
+        dest = game.rom_dest
+        target = dest.with_name(dest.name + ".zip") if game.multi_file else dest
+        progress = progress_bar("Downloading", size)
+        try:
+            self.client.download_rom(game.rom, target, progress)
+        finally:
+            progress.finish()
+        if game.multi_file:
+            unpack_zip(target, dest)
+        local = game.find_local_rom()
+        if not local:
+            fail(f"Downloaded, but no playable file found in {dest}")
+            return None
+        ok(f"ROM downloaded to {local}")
+        return local
+
+    def ensure_core(self, game: Game) -> Path | None:
+        cores_dir = Path(self.config["cores_dir"]).expanduser()
+        core = game.core
+        found = find_core(cores_dir, core) if core else None
+        if found:
+            return found
+        if core and self.config.get("auto_install_cores", True):
+            found = self.download_core(game, core, cores_dir)
+            if found:
+                return found
+        installed = installed_cores(cores_dir)
+        if core:
+            warn(f"The core for {game.platform_name} ({core_id(core)}) isn't installed in {cores_dir}.")
+            say(dim("Install it in RetroArch: Main Menu → Online Updater → Core Downloader,"))
+            say(dim("or pick one of the installed cores below."))
+        else:
+            say(f"No RetroArch core is set for {game.platform_name} yet.")
+        if not installed:
+            fail(f"No cores found in {cores_dir}.")
+            return None
+        answer = choose(f"Which installed core should {game.platform_name} use?",
+                        [(str(i), core_id(name)) for i, name in enumerate(installed, 1)],
+                        "Core number (q to cancel)", cancel=True)
+        if answer is None:
+            return None
+        chosen = installed[int(answer) - 1]
+        self.config["platforms"].setdefault(game.platform, {})["core"] = core_id(chosen)
+        self.save_config()
+        ok(f"{game.platform_name} will use {core_id(chosen)} from now on.")
+        return cores_dir / chosen
+
+    def download_core(self, game: Game, core: str, cores_dir: Path) -> Path | None:
+        """Install a missing core from libretro. None (with a warning) if that fails."""
+        ra = read_retroarch_cfg(self.config["retroarch"])
+        say(f"The {game.platform_name} core ({core_id(core)}) isn't installed. Downloading it from libretro…")
+        try:
+            path = install_core(core, cores_dir, ra, label="Downloading core")
+        except (CoreInstallError, OSError) as exc:
+            warn(f"Couldn't download the core automatically: {exc}")
+            return None
+        ok(f"Core installed: {path}")
+        # The Flatpak ships every core's .info file, inside the app (never write there).
+        if not flatpak_id(self.config["retroarch"]):
+            try:
+                install_core_info(core, core_info_dir(ra, cores_dir), ra)
+            except (CoreInstallError, OSError) as exc:
+                warn(f"Couldn't get the core's .info file ({exc}); RetroArch will still run it.")
+        if "steamapps" in str(self.config["retroarch"]).lower():
+            say(dim("Tip: with Steam's RetroArch, also install this core as a Steam add-on;"))
+            say(dim("Steam may remove cores it didn't install when it checks its files."))
+        return path
+
+    def mark_synced(self, game: Game, save_hash: str | None, pending: bool = False) -> None:
+        entry = self.state.setdefault(str(game.id), {})
+        entry.update({"hash": save_hash, "synced_at": datetime.now().strftime("%Y-%m-%d %H:%M")})
+        entry["pending_upload"] = pending
+        save_json(paths.STATE_FILE, self.state)
+
+    def sync_before_play(self, game: Game, save: FileSave | FolderSave) -> str | None:
+        """Bring RomM's newest save to this computer if it's newer.
+
+        Returns the hash of the save RomM has (None if it has none), or raises Quit."""
+        say("Checking RomM for your latest save…")
+        remote = fetch_remote(self.client, game, save)
+        local_hash = save.hash()
+        last = self.state.get(str(game.id), {}).get("hash")
+        action = decide(local_hash, remote.hash, last)
+
+        if action == "conflict":
+            choice = choose(
+                "This save changed both here and in RomM since the last sync:",
+                [("r", f"RomM's save           {fmt_time(remote.updated)}"),
+                 ("l", f"this computer's save  {fmt_time(save.modified())}")],
+                "Which one do you want to play with? (r/l, q to cancel)",
+                cancel=True, kind="warn", note="Both are backed up either way.",
+            )
+            if choice is None:
+                raise Quit
+            backup_bytes(save.read(), game.id, "local-before-conflict", save.suffix)
+            backup_bytes(remote.data or b"", game.id, "romm-before-conflict", save.suffix)
+            action = "download" if choice == "r" else "keep"
+
+        if action == "download":
+            if local_hash is not None:
+                backup_bytes(save.read(), game.id, "replaced-by-romm", save.suffix)
+            save.write(remote.data or b"")
+            self.mark_synced(game, remote.hash)
+            ok(f"Save from RomM ({fmt_time(remote.updated)}) → {save.location}")
+        elif action == "keep" and remote.hash is None:
+            ok("RomM has no save for this game yet; using the one on this computer.")
+            say(dim("It's uploaded to RomM when you close the game."))
+        elif action == "keep":
+            ok("The save on this computer is newer than RomM's; keeping it.")
+        elif remote.hash is None:
+            ok("RomM has no save for this game yet (and neither does this computer).")
+            say(dim("Starting fresh; the save the game makes is uploaded to RomM when you close it."))
+        else:
+            self.mark_synced(game, remote.hash)
+            ok("Save is already up to date.")
+        return remote.hash
+
+    def apply_screen_layout(self, game: Game, core: Path, rom_file: Path, screen: str | None = None) -> None:
+        """For two-screen games: show the main screen only, both, or the main screen with a
+        small touch screen in the corner (where the core can). Asks (default: the choice
+        from last time, else both) unless `screen` is given, then sets the core's options
+        in RetroArch's options file before RetroArch starts."""
+        layouts = SCREEN_LAYOUTS[core_id(core.name)]
+        choices = [c for c in SCREEN_CHOICES if c in layouts]
+        entry = self.state.setdefault(str(game.id), {})
+        last = entry.get("screen_layout") if entry.get("screen_layout") in choices else "both"
+        if screen not in choices:
+            if screen:
+                warn(f"\"{screen}\" isn't available for this core.")
+            answer = choose(
+                "This game has two screens. Which layout?",
+                [(str(n), SCREEN_CHOICES[c] + ("  (last time)" if c == last else ""))
+                 for n, c in enumerate(choices, 1)],
+                "Layout", default=str(choices.index(last) + 1),
+            )
+            screen = choices[int(answer) - 1]
+        ra = read_retroarch_cfg(self.config["retroarch"])
+        name = core_display_name(self.config["cores_dir"], core.name, ra.get("libretro_info_path"))
+        if not name:
+            warn("Couldn't tell where this core keeps its options; the layout is unchanged.")
+            return
+        path = core_options_file(self.config["retroarch"], ra, name, rom_file)
+        values = dict(layouts[screen])
+        touch = TOUCH_CONTROLS.get(core_id(core.name)) if screen != "main" else None
+        if touch:
+            key, shown, hidden = touch["pointer"]
+            values[key] = shown if self.config.get("show_touch_pointer", True) else hidden
+        try:
+            set_core_options(path, values)
+        except OSError as exc:
+            warn(f"Couldn't set the screen layout in {path} ({exc}); RetroArch keeps its own setting.")
+            return
+        entry["screen_layout"] = screen
+        save_json(paths.STATE_FILE, self.state)
+        say(dim(f"{SCREEN_CHOICES[screen]}. To change it while playing: F1 → Core Options."))
+        if touch:
+            say(dim(touch["help"]))
+
+    def play(self, game: Game, launch: bool = True, screen: str | None = None) -> None:
+        print()
+        say(bold(f"▶ {game.name}") + dim(f"  ({game.platform_name})"))
+        rom_file = self.ensure_rom(game)
+        if not rom_file:
+            return
+        core = self.ensure_core(game) if launch else None
+        if launch and not core:
+            return
+        save = game.save(rom_file)
+        remote_hash: str | None = None
+        synced = False
+        if not save:
+            warn(f"This game's save can't be synced with RomM (unknown save location for {game.platform_name}).")
+        elif self.client:
+            remote_hash = self.sync_before_play(game, save)
+            synced = True
+        else:
+            warn("Offline: playing with the save on this computer. It uploads next time you're online.")
+
+        if not launch:
+            return
+        retroarch = self.config["retroarch"]
+        if not retroarch_installed(retroarch):
+            if flatpak_id(retroarch):
+                fail(f"The RetroArch Flatpak isn't installed: flatpak install flathub {flatpak_id(retroarch)}")
+            else:
+                fail(f"RetroArch not found at {retroarch}. Fix it with --setup.")
+            return
+        if core_id(core.name) in SCREEN_LAYOUTS:
+            self.apply_screen_layout(game, core, rom_file, screen)
+        entry = self.state.setdefault(str(game.id), {})
+        entry["last_played"] = datetime.now().isoformat(timespec="seconds")
+        save_json(paths.STATE_FILE, self.state)
+
+        hash_before = save.hash() if save else None
+        print()
+        say(f"Starting RetroArch. When you're done: {bold('F1 → Close Content')}, then quit RetroArch.")
+        try:
+            proc = subprocess.Popen(
+                retroarch_command(retroarch) + ["-L", str(core), str(rom_file)],
+                cwd=None if flatpak_id(retroarch) else str(Path(retroarch).expanduser().parent),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                # Ctrl+C in this terminal must not kill the game.
+                **(
+                    {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+                    if IS_WINDOWS
+                    else {"start_new_session": True}
+                ),
+            )
+        except OSError as exc:
+            fail(f"Could not start RetroArch: {exc}")
+            return
+        self.wait_for(proc)
+
+        if not save:
+            return
+        local_hash = save.hash()
+        if local_hash is None:
+            say("No save file was written, so there's nothing to upload.")
+            return
+        if local_hash == remote_hash and synced:
+            ok("Save unchanged; RomM already has it.")
+            return
+        if local_hash == hash_before:
+            say("The save didn't change while playing, but RomM doesn't have it yet.")
+        self.upload(game, save)
+
+    def wait_for(self, proc: subprocess.Popen) -> None:
+        say(dim("Waiting for RetroArch to close…"))
+        while True:
+            try:
+                proc.wait()
+                return
+            except KeyboardInterrupt:
+                print()
+                warn("RetroArch is still running. The save is uploaded when it closes.")
+                if ask_yes("Stop waiting? (then upload later with --upload)", default=False):
+                    raise Quit
+                say(dim("Still waiting…"))
+
+    def upload(self, game: Game, save: FileSave | FolderSave) -> bool:
+        local_hash = save.hash()
+        data = save.read()
+        if not self.client:
+            self.mark_pending(game)
+            warn("Offline: the save stays on this computer and uploads next time.")
+            return False
+        say(f"Uploading your save to RomM ({human_size(len(data))})…")
+        try:
+            self.backup_romm_copy(game, save, local_hash)
+            self.client.upload_save(game.id, save.upload_name, data, core_id(game.core or "unknown"))
+        except RommError as exc:
+            self.mark_pending(game)
+            print()
+            fail(red(bold("YOUR SAVE WAS NOT UPLOADED TO RomM.")))
+            fail(str(exc))
+            say(f"It is safe on this computer: {save.location}")
+            say("The launcher will try again next time it starts.")
+            return False
+        self.mark_synced(game, local_hash)
+        ok("Save uploaded to RomM.")
+        return True
+
+    def backup_romm_copy(self, game: Game, save: FileSave | FolderSave, new_hash: str | None) -> None:
+        """An upload replaces RomM's save of the same name, so keep a copy of that first.
+        If the copy can't be made, raise, and nothing is uploaded."""
+        try:
+            for info in self.client.list_saves(game.id):
+                if info.get("file_name") != save.upload_name or info.get("missing_from_fs"):
+                    continue
+                data = self.client.download_save(info)
+                try:
+                    same = save.hash_of(data) == new_hash
+                except RommError:  # e.g. a broken zip: keep it anyway
+                    same = False
+                if not same:
+                    backup_bytes(data, game.id, "romm-before-upload", save.suffix)
+        except (RommError, OSError) as exc:
+            raise RommError(f"Couldn't back up the save RomM has now, so it wasn't replaced ({exc})") from exc
+
+    def mark_pending(self, game: Game) -> None:
+        entry = self.state.setdefault(str(game.id), {})
+        entry["pending_upload"] = True
+        entry["pending_name"] = game.name
+        save_json(paths.STATE_FILE, self.state)
+
+    def retry_pending(self, games: list[Game]) -> None:
+        pending = [g for g in games if self.state.get(str(g.id), {}).get("pending_upload")]
+        for game in pending:
+            rom_file = game.find_local_rom()
+            save = game.save(rom_file) if rom_file else None
+            if not save or save.hash() is None:
+                continue
+            warn(f"The last save of {game.name} never reached RomM. Uploading it now.")
+            self.upload(game, save)
+
+    def upload_now(self, game: Game) -> None:
+        rom_file = game.find_local_rom()
+        if not rom_file:
+            fail(f"{game.name} isn't on this computer, so there's no save to upload.")
+            return
+        save = game.save(rom_file)
+        if not save:
+            fail(f"Saves for {game.name} can't be synced with RomM.")
+            return
+        if save.hash() is None:
+            fail(f"No save found at {save.location}")
+            return
+        say(f"{save.location}  ({fmt_time(save.modified())}, {human_size(len(save.read()))})")
+        if ask_yes(f"Upload this as the newest save of {game.name}?"):
+            self.upload(game, save)
