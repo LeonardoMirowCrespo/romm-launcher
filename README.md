@@ -45,8 +45,11 @@ python3 romm_launcher.py --gui
 Opens the launcher as a window, like a game store's library:
 
 - **Sign in** with your RomM address, username and password (the same as in the
-  terminal; with `keyring` installed you can have the password remembered).
-- **Your whole RomM library** as covers, with the platform in the corner. Each one says
+  terminal; with `keyring` installed you can have the password remembered). After the
+  first time, only the username and password are asked; the address is shown under the
+  box, and a click on it changes it.
+- **Your whole RomM library** as covers, each shown whole at its own size, with the
+  platform in the corner. Each one says
   whether the game is **installed** (on this computer) or **in the cloud** (downloaded the
   first time you play it).
 - **Search** at the top (Ctrl+F; Escape clears it), and chips to show **all games**, only

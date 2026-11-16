@@ -844,6 +844,13 @@ if window:
     window.show_login()
     check("login asks for address, username and password", window.v_url.get().rstrip("/") == base.rstrip("/")
           and window.v_user.get() == "leo" and window.v_pass.get() == "")
+    check("known address shown under the box, not asked", window.address_line is not None
+          and any(base.split("//")[1].rstrip("/") in w.cget("text") for w in window.address_line.winfo_children()))
+    window.edit_address()
+    window.v_url.set("https://other.example")
+    window.finish_address_edit(False)  # what Escape does
+    check("Escape undoes an address edit", window.v_url.get().rstrip("/") == base.rstrip("/")
+          and isinstance(window.address_line.winfo_children()[0], gui.tk.Label))
     window.v_pass.set("wrong")
     window.do_login()
     check("wrong password shown", pump(lambda: "rejected" in window.login_msg.cget("text")))
@@ -867,6 +874,9 @@ if window:
           and len(window.layout_row.winfo_children()) == 3)
     window.layout_row.winfo_children()[0].invoke()
     check("layout chip picks the layout", window.v_layout.get() == "main")
+    wide, big = gui.tk.PhotoImage(width=204, height=142), gui.tk.PhotoImage(width=408, height=408)
+    fitted = [window.fit_image(i, 204, 204) for i in (wide, big)]
+    check("covers fit whole, never cut", [(i.width(), i.height()) for i in fitted] == [(204, 142), (204, 204)])
     check("cover title cut to fit", window.fit_text("x" * 200, window.font(10, "bold"), window.TILE_W).endswith("…"))
     # The launcher's questions from a worker thread become dialogs on Tk's thread.
     window.ask_choice = lambda question, options, default, cancel, note: "l"

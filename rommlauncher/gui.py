@@ -230,7 +230,7 @@ class GuiApp:
         style.map("Vertical.TScrollbar", background=[("active", THEME["hover"])])
         r.protocol("WM_DELETE_WINDOW", self.on_close)
         self.px = tk.PhotoImage(width=1, height=1)  # lets a text label be sized in pixels
-        self.TILE_W, self.COVER_H = self.S(168), self.S(168)  # RomM's covers are mostly box art, near square
+        self.TILE_W = self.COVER_H = self.S(204)  # RomM's small covers: 204 px wide, at most 204 tall
         self.DETAIL_H = self.S(220)
 
     def _clear(self) -> None:
@@ -285,14 +285,19 @@ class GuiApp:
         self.v_user = tk.StringVar(value=cfg.get("username", ""))
         self.v_pass = tk.StringVar(value=stored)
         self.v_remember = tk.BooleanVar(value=bool(stored))
+        # After the first login the address isn't asked any more: it's shown under the box,
+        # and a click on it edits it.
+        ask_url = not cfg.get("romm_url")
+        spec = [("Username", self.v_user, None), ("Password", self.v_pass, "•")]
+        if ask_url:
+            spec.insert(0, ("RomM address (e.g. https://romm.example.com)", self.v_url, None))
         fields = []
-        for text, var, show in (("RomM address (e.g. https://romm.example.com)", self.v_url, None),
-                                ("Username", self.v_user, None), ("Password", self.v_pass, "•")):
+        for text, var, show in spec:
             self.label(box, text, 9, fg=THEME["muted"]).pack(anchor="w")
             e = self.entry(box, var, show)
             e.pack(fill="x", ipady=self.S(6), pady=(self.S(3), self.S(12)))
             e.bind("<Return>", self.do_login)
-            fields.append(e)
+            fields.append((e, var))
         if HAVE_KEYRING:
             self.check(box, "Remember the password (system keyring)", self.v_remember).pack(anchor="w")
         else:
@@ -306,8 +311,53 @@ class GuiApp:
         self.login_btn.pack(side="left")
         if paths.LIBRARY_CACHE.exists():
             self.button(buttons, "Play offline", self.play_offline).pack(side="left", padx=self.S(10))
-        empty = [e for e, v in zip(fields, (self.v_url, self.v_user, self.v_pass)) if not v.get()]
+        self.address_line = None
+        if not ask_url:
+            self.address_line = tk.Frame(outer, bg=THEME["bg"])
+            self.address_line.place(relx=0.5, rely=1.0, y=-self.S(28), anchor="s")
+            self.show_address()
+        empty = [e for e, var in fields if not var.get()]
         (empty[0] if empty else self.login_btn).focus_set()
+
+    def show_address(self) -> None:
+        """The RomM address under the login box, as quiet text; a click edits it."""
+        line = self.address_line
+        for w in line.winfo_children():
+            w.destroy()
+        parts = urllib.parse.urlsplit(self.v_url.get())
+        shown = (parts.netloc + parts.path.rstrip("/")) or self.v_url.get()
+        text = self.label(line, f"RomM server   {shown}   ✎", 9, fg=THEME["muted"], cursor="hand2")
+        text.pack()
+        text.bind("<Enter>", lambda e: text.config(fg=THEME["text"]))
+        text.bind("<Leave>", lambda e: text.config(fg=THEME["muted"]))
+        text.bind("<Button-1>", lambda e: self.edit_address())
+        self.tooltip(text, "Click to change the RomM address")
+
+    def edit_address(self) -> None:
+        """Turn the address under the login box into a text field: Enter keeps it, Escape undoes."""
+        line, before = self.address_line, self.v_url.get()
+        for w in line.winfo_children():
+            w.destroy()
+        e = self.entry(line, self.v_url, width=44)
+        e.pack(ipady=self.S(4))
+        e.focus_set()
+        e.select_range(0, "end")
+        e.icursor("end")
+
+        done = []
+
+        def finish(keep: bool):
+            if done or not e.winfo_exists():  # Return/Escape, then FocusOut as the field goes
+                return
+            done.append(keep)
+            if not keep or not self.v_url.get().strip():
+                self.v_url.set(before)
+            self.show_address()
+
+        self.finish_address_edit = finish
+        e.bind("<Return>", lambda ev: (finish(True), self.do_login()))
+        e.bind("<Escape>", lambda ev: finish(False))
+        e.bind("<FocusOut>", lambda ev: finish(True))
 
     def do_login(self, event=None) -> None:
         url = self.v_url.get().strip().rstrip("/")
@@ -590,37 +640,26 @@ class GuiApp:
         except tk.TclError:
             return
         self.covers[game.id] = image
-        self.tile_images[game.id] = self.fit_image(image, self.TILE_W, self.COVER_H, fill=True)
+        fitted = self.tile_images[game.id] = self.fit_image(image, self.TILE_W, self.COVER_H)
         tile = self.tiles.get(game.id)
         if tile:
-            tile[1].config(image=self.tile_images[game.id], text="", bg=THEME["card"])
+            tile[1].config(image=fitted, text="", width=fitted.width(), height=fitted.height(), bg=THEME["bg"])
         if self.selected and self.selected.id == game.id:
             self.show_details(self.selected)
 
-    def fit_image(self, image, width: int, height: int, fill: bool = False):
-        """Scale image to fit in width x height (fill: cover it, cutting off the edges, as long
-        as that cuts little). Tk alone can only zoom and subsample by whole numbers, so the
-        scale is the closest fraction a/b with small a and b."""
+    def fit_image(self, image, width: int, height: int):
+        """Scale image so all of it fits in width x height. Tk alone can only zoom and
+        subsample by whole numbers, so the scale is the closest fraction a/b at or below it."""
         iw, ih = image.width(), image.height()
         if not (iw and ih):
             return image
-        contain, cover = min(width / iw, height / ih), max(width / iw, height / ih)
-        fill = fill and cover / contain <= 1.2
-        target = cover if fill else contain
-        options = [(a, b) for b in range(1, 9) for a in range(1, 9)]
-        if fill:
-            a, b = min((ab for ab in options if ab[0] / ab[1] >= target), key=lambda ab: ab[0] / ab[1], default=(8, 1))
-        else:
-            a, b = max((ab for ab in options if ab[0] / ab[1] <= target), key=lambda ab: ab[0] / ab[1], default=(1, 8))
-        if (a, b) != (1, 1):
-            image = (image.zoom(a) if a > 1 else image)
-            image = image.subsample(b) if b > 1 else image
-        if image.width() > width or image.height() > height:  # cut the edges, keep the middle
-            w, h = min(width, image.width()), min(height, image.height())
-            x, y = (image.width() - w) // 2, (image.height() - h) // 2
-            part = tk.PhotoImage(width=w, height=h)
-            part.tk.call(part, "copy", image, "-from", x, y, x + w, y + h)
-            image = part
+        target = min(width / iw, height / ih)
+        a, b = max(((a, b) for b in range(1, 9) for a in range(1, 9) if a / b <= target),
+                   key=lambda ab: ab[0] / ab[1], default=(1, 8))
+        if a > 1:
+            image = image.zoom(a)
+        if b > 1:
+            image = image.subsample(b)
         return image
 
     def refresh_local(self) -> None:
@@ -704,24 +743,32 @@ class GuiApp:
         tile = tk.Frame(self.grid_frame, bg=THEME["bg"], cursor="hand2")
         ring = tk.Frame(tile, bg=THEME["accent"] if selected else THEME["bg"], padx=self.S(2), pady=self.S(2))
         ring.pack(anchor="w")
+        # A fixed box the size of the biggest cover; each cover sits in its middle, whole,
+        # and the rest of the box is see-through (only outlined on hover or when selected).
+        box = tk.Frame(ring, bg=THEME["bg"], width=self.TILE_W, height=self.COVER_H)
+        box.pack()
+        box.pack_propagate(False)
         image = self.tile_images.get(game.id)
         if image:
-            cover = tk.Label(ring, image=image, width=self.TILE_W, height=self.COVER_H, bg=THEME["card"], bd=0)
+            cover = tk.Label(box, image=image, bg=THEME["bg"], bd=0)
         else:
-            cover = tk.Label(ring, image=self.px, compound="center", width=self.TILE_W, height=self.COVER_H,
+            cover = tk.Label(box, image=self.px, compound="center", width=self.TILE_W, height=self.COVER_H * 9 // 10,
                              text=game.name, wraplength=self.TILE_W - self.S(28), font=self.font(11, "bold"),
                              fg="#ffffff", bg=self.platform_color(game.platform), bd=0)
-        cover.pack()
-        tag = tk.Label(cover, text=PLATFORM_SHORT.get(game.platform, game.platform_name), font=self.font(8, "bold"),
+        cover.pack(expand=True)  # centred, so the box shows above and below it
+        # A sibling placed over the cover, not a child of it: Windows repaints a label's
+        # image over its children.
+        tag = tk.Label(box, text=PLATFORM_SHORT.get(game.platform, game.platform_name), font=self.font(8, "bold"),
                        fg=THEME["text"], bg=THEME["rail"], padx=self.S(5), pady=0)
-        tag.place(relx=1.0, x=-self.S(6), y=self.S(6), anchor="ne")
+        tag.place(in_=cover, relx=1.0, x=-self.S(6), y=self.S(6), anchor="ne")
+        tag.lift()
         title = self.label(tile, self.fit_text(game.name, self.font(10, "bold"), self.TILE_W), 10, "bold", anchor="w")
         title.pack(fill="x", padx=self.S(2), pady=(self.S(8), 0))
         local = game.id in self.local_ids
         status = self.label(tile, "●  Installed" if local else "☁  In the cloud", 9,
                             fg=THEME["ok"] if local else THEME["muted"], anchor="w")
         status.pack(fill="x", padx=self.S(2))
-        for w in (tile, ring, cover, tag, title, status):
+        for w in (tile, ring, box, cover, tag, title, status):
             w.bind("<Button-1>", lambda e, g=game: self.select(g))
             w.bind("<Double-Button-1>", lambda e, g=game: self.play(g))
         tile.bind("<Enter>", lambda e: self._hover(game, True))
