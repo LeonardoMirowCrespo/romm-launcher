@@ -10,6 +10,7 @@ import getpass
 import re
 import shutil
 import subprocess
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -22,21 +23,13 @@ from .dualscreen import SCREEN_CHOICES, SCREEN_LAYOUTS, TOUCH_CONTROLS
 from .games import Game, filter_games, guess_platform, index_roms, unpack_zip
 from .ports import (
     PLAYERS,
+    PORTS,
     RETROARCH,
-    SOH,
-    SOH_SITE,
-    SohInstallError,
+    Port,
+    PortInstallError,
     config_path,
-    find_soh,
-    install_soh,
-    latest_soh_release,
     player_choices,
-    soh_archive,
-    soh_data_dir,
-    soh_install_dir,
-    soh_installed,
-    soh_launch,
-    soh_save,
+    port_for,
 )
 from .retroarch import (
     DEFAULT_RETROARCH,
@@ -76,10 +69,10 @@ from .ui import (
 from .util import fmt_time, load_json, save_json
 
 if TYPE_CHECKING:
-    from .ports import SohSave
+    from .ports import PortSave
     from .saves import FileSave, FolderSave
 
-    Save = FileSave | FolderSave | SohSave
+    Save = FileSave | FolderSave | PortSave
 
 
 class Launcher:
@@ -145,8 +138,9 @@ class Launcher:
                 here.pop("roms_dir", None)
                 cfg["roms_dir"] = answer
         self.setup_retroarch()
-        print()
-        self.setup_soh()
+        for port in PORTS.values():
+            print()
+            self.setup_port(port)
 
     def setup_retroarch(self) -> None:
         """Ask for RetroArch's paths on this system and save them in its section."""
@@ -208,80 +202,82 @@ class Launcher:
                 return candidate
         return current
 
-    def setup_soh(self) -> bool:
-        """Set up Ship of Harkinian (optional: q / Enter skips): download it, or ask where it
-        is. Returns whether it's set."""
+    def setup_port(self, port: Port) -> bool:
+        """Set up a PC port (optional: q / Enter skips): download it, or ask where it is.
+        Returns whether it's set."""
         cfg = self.config
-        say(dim(f"Ship of Harkinian plays Ocarina of Time (N64/GameCube) as a PC game ({SOH_SITE})."))
-        found = find_soh(cfg)
+        say(dim(f"{port.name} plays {port.game} (N64/GameCube) as a PC game ({port.site})."))
+        found = port.find(cfg)
         if not found:
-            release = self.soh_release()
+            release = self.port_release(port)
             if release:
                 size = f", {human_size(release['size'])}" if release.get("size") else ""
                 answer = choose(
-                    "Ship of Harkinian isn't on this computer yet.",
+                    f"{port.name} isn't on this computer yet.",
                     [("1", f"Download it for me: version {release['version']}{size}, from its GitHub page"),
                      ("2", "I have it already: tell the launcher where")],
                     "Choice (q to skip)", default="1", cancel=True,
-                    note=f"It's installed in {soh_install_dir()}, with its settings and saves.",
+                    note=f"It's installed in {port.install_dir()}, with its settings and saves.",
                 )
                 if answer is None:
                     return False
                 if answer == "1":
-                    return self.download_soh(release)
-        say(dim("(Windows: unzip it to a folder of its own, e.g. C:\\Games\\SoH; Linux: the .appimage)."))
-        program = "soh.exe" if IS_WINDOWS else ".appimage"
+                    return self.download_port(port, release)
+        example = "C:\\Games\\" + port.exe.rsplit(".", 1)[0].upper()
+        say(dim(f"(Windows: unzip it to a folder of its own, e.g. {example}; Linux: the .appimage)."))
+        program = port.exe if IS_WINDOWS else ".appimage"
         while True:
-            answer = ask(f"Ship of Harkinian program ({program}; Enter to skip)", found).strip().strip('"')
+            answer = ask(f"{port.name} program ({program}; Enter to skip)", found).strip().strip('"')
             if not answer:
                 return False
             path = Path(answer).expanduser()
             if not path.is_absolute():
                 path = paths.APP_HOME / path
-            if path.is_dir() and (path / "soh.exe").is_file():
-                path = path / "soh.exe"
+            if path.is_dir() and (path / port.exe).is_file():
+                path = path / port.exe
             if path.is_file():
                 break
             warn(f"Not found: {path}")
-        self.use_soh(path)
+        self.use_port(port, path)
         return True
 
-    def use_soh(self, program: Path) -> None:
+    def use_port(self, port: Port, program: Path) -> None:
         cfg = self.config
         cfg.setdefault(system.OS_KEY, {})
-        cfg["soh"] = config_path(program)
+        cfg[port.key] = config_path(program)
         self.save_config()
-        ok(f"Ship of Harkinian: {program}  (its saves: {soh_data_dir(cfg) / 'Save'})")
+        ok(f"{port.name}: {program}  (its saves: {port.saves_dir(cfg)})")
 
-    def soh_release(self) -> dict | None:
-        """SoH's latest release for this computer from GitHub, or None (with a note why)."""
-        say(dim("Asking GitHub for Ship of Harkinian's latest version…"))
+    def port_release(self, port: Port) -> dict | None:
+        """A port's latest release for this computer from GitHub, or None (with a note why)."""
+        say(dim(f"Asking GitHub for {port.name}'s latest version…"))
         try:
-            return latest_soh_release()
-        except SohInstallError as exc:
+            return port.latest_release()
+        except PortInstallError as exc:
             warn(str(exc))
             return None
 
-    def download_soh(self, release: dict | None = None) -> bool:
-        """Download and install Ship of Harkinian, and use it from now on."""
-        release = release or self.soh_release()
+    def download_port(self, port: Port, release: dict | None = None) -> bool:
+        """Download and install a PC port, and use it from now on."""
+        release = release or self.port_release(port)
         if not release:
             return False
         try:
-            program = install_soh(release, label=f"Downloading Ship of Harkinian {release['version']}")
-        except (SohInstallError, OSError) as exc:
-            fail(f"Couldn't install Ship of Harkinian: {exc}")
+            program = port.install(release, label=f"Downloading {port.name} {release['version']}")
+        except (PortInstallError, OSError) as exc:
+            fail(f"Couldn't install {port.name}: {exc}")
             return False
         checked = "checked against GitHub's checksum" if release.get("sha256") else "GitHub lists no checksum for it"
-        ok(f"Ship of Harkinian {release['version']} installed in {program.parent} ({checked}).")
-        self.use_soh(program)
+        ok(f"{port.name} {release['version']} installed in {program.parent} ({checked}).")
+        self.use_port(port, program)
         return True
 
     def check_install(self) -> None:
         """Point out missing RetroArch pieces right away instead of at play time."""
         cfg = self.config
-        if cfg.get("soh") and not soh_installed(cfg):
-            warn(f"Ship of Harkinian not found at {cfg['soh']}")
+        for port in PORTS.values():
+            if cfg.get(port.key) and not port.installed(cfg):
+                warn(f"{port.name} not found at {cfg[port.key]}")
         if not retroarch_installed(cfg["retroarch"]):
             if flatpak_id(cfg["retroarch"]):
                 warn(f"The Flatpak {flatpak_id(cfg['retroarch'])} isn't installed "
@@ -589,16 +585,17 @@ class Launcher:
         if touch:
             say(dim(touch["help"]))
 
-    # ----- what plays a game: RetroArch, or a PC port (Ship of Harkinian) ------
+    # ----- what plays a game: RetroArch, or a PC port (Ship of Harkinian, 2S2H) ------
 
     def default_player(self, game: Game) -> str:
         """What plays this game unless the player picks: the choice from last time, else
-        Ship of Harkinian when it's set up, else RetroArch."""
+        its PC port when that's set up, else RetroArch."""
         choices = player_choices(game)
         last = self.state.get(str(game.id), {}).get("player")
         if last in choices:
             return last
-        return SOH if choices and soh_installed(self.config) else RETROARCH
+        port = port_for(game)
+        return port.key if port and port.installed(self.config) else RETROARCH
 
     def choose_player(self, game: Game, player: str | None = None, launch: bool = True) -> str:
         """For games a PC port can play: RetroArch or the port? Asks (default: last time's)
@@ -615,9 +612,9 @@ class Launcher:
                 warn(f"\"{player}\" can't play this game.")
             if not launch:
                 return last
+            port = port_for(game)
             labels = {
-                SOH: "Ship of Harkinian: the PC version, with widescreen, high resolution and 60 fps"
-                     + ("" if soh_installed(self.config) else "  (not set up yet)"),
+                port.key: f"{port.name}: {port.tip}" + ("" if port.installed(self.config) else "  (not set up yet)"),
                 RETROARCH: f"RetroArch ({game.core or 'its N64 core'}): the original game",
             }
             answer = choose(
@@ -632,19 +629,20 @@ class Launcher:
         save_json(paths.STATE_FILE, self.state)
         return player
 
-    def ensure_soh(self) -> bool:
-        if soh_installed(self.config):
+    def ensure_port(self, port: Port) -> bool:
+        if port.installed(self.config):
             return True
-        if self.config.get("soh"):
-            warn(f"Ship of Harkinian isn't at {self.config['soh']} any more.")
+        if self.config.get(port.key):
+            warn(f"{port.name} isn't at {self.config[port.key]} any more.")
         else:
-            say("Ship of Harkinian isn't set up on this computer yet.")
-        return self.setup_soh()
+            say(f"{port.name} isn't set up on this computer yet.")
+        return self.setup_port(port)
 
     def save_for(self, game: Game, rom_file: Path, player: str | None = None) -> "Save | None":
         """This game's save on this computer for what plays it (default: last time's)."""
-        if (player or self.default_player(game)) == SOH:
-            return soh_save(self.config, rom_file)
+        port = PORTS.get(player or self.default_player(game))
+        if port:
+            return port.save(self.config, rom_file)
         return game.save(rom_file)
 
     def play(self, game: Game, launch: bool = True, screen: str | None = None, player: str | None = None) -> None:
@@ -654,9 +652,10 @@ class Launcher:
         if not rom_file:
             return
         player = self.choose_player(game, player, launch)
+        port = PORTS.get(player)
         core = None
-        if player == SOH:
-            if launch and not self.ensure_soh():
+        if port:
+            if launch and not self.ensure_port(port):
                 return
         elif launch:
             core = self.ensure_core(game)
@@ -665,8 +664,8 @@ class Launcher:
         save = self.save_for(game, rom_file, player)
         remote_hash: str | None = None
         synced = False
-        if not save and player == SOH:
-            warn("Ship of Harkinian isn't set up on this computer, so its save isn't synced.")
+        if not save and port:
+            warn(f"{port.name} isn't set up on this computer, so its save isn't synced.")
         elif not save:
             warn(f"This game's save can't be synced with RomM (unknown save location for {game.platform_name}).")
         elif self.client:
@@ -678,16 +677,18 @@ class Launcher:
         if not launch:
             return
         env = None
-        if player == SOH:
-            name = PLAYERS[SOH]
+        if port:
+            name = port.name
             try:
-                command, cwd, env = soh_launch(self.config, game, rom_file)
-            except OSError as exc:
-                fail(f"Could not prepare Ship of Harkinian's folder: {exc}")
+                command, cwd, env = port.launch(self.config, game, rom_file)
+            except (OSError, zipfile.BadZipFile) as exc:
+                fail(f"Could not prepare {name}'s folder: {exc}")
                 return
             if len(command) > 1:
-                say(f"Ship of Harkinian first turns the ROM into {soh_archive(game)} (only this once; it takes a minute),")
-                say("then asks \"Run SoH?\": answer Yes.")
+                end = "," if port.first_run else "."
+                say(f"{name} first turns the ROM into {port.archive_for(game)} (only this once; it takes a minute){end}")
+                if port.first_run:
+                    say(port.first_run)
             done_hint = "save in the game (pause menu), then close its window"
         else:
             retroarch = self.config["retroarch"]
@@ -728,6 +729,8 @@ class Launcher:
             fail(f"Could not start {name}: {exc}")
             return
         self.wait_for(proc, name)
+        if port:
+            port.cleanup(self.config)
 
         if not save:
             return
@@ -799,7 +802,7 @@ class Launcher:
         entry = self.state.setdefault(str(game.id), {})
         entry["pending_upload"] = True
         entry["pending_name"] = game.name
-        entry["pending_player"] = SOH if save is not None and save.emulator == SOH else RETROARCH
+        entry["pending_player"] = save.emulator if save is not None and save.emulator in PORTS else RETROARCH
         save_json(paths.STATE_FILE, self.state)
 
     def retry_pending(self, games: list[Game]) -> None:
