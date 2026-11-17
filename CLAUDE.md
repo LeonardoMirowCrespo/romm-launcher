@@ -14,7 +14,7 @@ usernames) belongs in the committed files.
 
 Usage: `romm_launcher.py` (pick from library), `romm_launcher.py zelda` (straight to a match),
 `--list`, `--upload <game>`, `--add <file>...` (add game files to RomM), `--no-launch`, `--screen main|both|corner`,
-`--with soh|retroarch`, `--gui`, `--setup`, `--paths` (alias `--backups`).
+`--with soh|2ship|retroarch`, `--gui`, `--setup`, `--paths` (alias `--backups`).
 First run asks for setup.
 
 Flow when a game is picked:
@@ -61,7 +61,7 @@ downwards in this list (no import cycles; type-only imports use `TYPE_CHECKING`)
 | Module | Contents |
 | --- | --- |
 | `system.py` | `APP_NAME`, `IS_WINDOWS`, `OS_KEY`/`OS_KEYS`/`OS_NAMES`, `CORE_EXT(S)`, optional `keyring` (`HAVE_KEYRING`) |
-| `paths.py` | `APP_HOME` and the data files (`CONFIG_FILE`, `STATE_FILE`, `LIBRARY_CACHE`, `BACKUP_DIR`, `COVER_DIR`, `SOH_DIR`), `OLD_LOCATIONS` |
+| `paths.py` | `APP_HOME` and the data files (`CONFIG_FILE`, `STATE_FILE`, `LIBRARY_CACHE`, `BACKUP_DIR`, `COVER_DIR`), `OLD_LOCATIONS` |
 | `ui.py` | `TerminalUI`, `set_ui`, `say/ok/warn/fail`, `ask`, `ask_yes`, `choose`, `progress_bar`, `Progress`, `Quit`, colours, `human_size` |
 | `util.py` | `load_json`, `save_json`, `sha256`, `file_hash`, `parse_time`, `fmt_time`, `write_new_file` |
 | `retroarch.py` | Flatpak/Steam/default RetroArch, `read_retroarch_cfg`, `core_id`, `find_core`, `installed_cores`, `core_display_name`, `core_save_folder`, `KNOWN_CORE_FOLDERS`, core options (`retroarch_config_dir`, `core_options_file`, `set_core_options`) |
@@ -70,7 +70,7 @@ downwards in this list (no import cycles; type-only imports use `TYPE_CHECKING`)
 | `core_downloads.py` | buildbot: `install_core`, `install_core_info`, `core_download_url`, `http_download`, `CoreInstallError` |
 | `romm.py` | `RommClient` (+ safety lock `_check`, `ALLOWED_WRITES`; `upload_rom`, `start_scan`, `wait_for_task`, `list_platforms`), `RommError`, `LoginError` |
 | `saves.py` | `FileSave`, `FolderSave`, 3DS title ID helpers, `backup_bytes`/`backup_file`, `RemoteSave`, `fetch_remote`, `decide` |
-| `ports.py` | PC ports: Ship of Harkinian (`is_soh_game`, `player_choices`, `soh_data_dir`, `soh_launch`, `SohSave`, `find_soh`; download: `latest_soh_release`, `install_soh`, `SohInstallError`, `GITHUB_API`/`GITHUB`), `SOH`/`RETROARCH`/`PLAYERS` |
+| `ports.py` | PC ports: `Port` (`plays`, `archive_for`, `program`, `installed`, `data_dir`, `saves_dir`, `launch`, `cleanup`, `save`, `find`; download: `install_dir`, `latest_release`, `install`), `SHIP_OF_HARKINIAN`, `TWO_SHIP`, `PORTS`, `port_for`, `player_choices`, `PortSave`, `unpacked_rom`, `PortInstallError`, `GITHUB_API`/`GITHUB`, `SOH`/`TWOSHIP`/`RETROARCH`/`PLAYERS` |
 | `games.py` | `Game`, `index_roms`, `unpack_zip`, `filter_games`, GUI library helpers (`library_filters`, `filter_library`, `local_game_ids`), `fetch_cover`, `ROM_PLATFORMS`/`guess_platform`, `game_facts` |
 | `launcher.py` | `Launcher` (setup, login, library, picker, `play`, `upload`, `retry_pending`, `add_rom`, ...) |
 | `gui.py` | `GuiUI`, `GuiProgress`, `GuiApp`, `run_gui` |
@@ -169,43 +169,57 @@ GameCube, Wii, Saturn, arcade/Neo Geo (fbneo). Core names checked against libret
 core-info repo and the buildbot (Windows and Linux); each core's save-folder name is in
 `KNOWN_CORE_FOLDERS` (its `.info` corename).
 
-**Ship of Harkinian** (`ports.py`, added 2026-11-17 at the user's request; checked against
-SoH 9.3's source). Ocarina of Time on `n64`/`ngc` (`is_soh_game`: name has "ocarina" and
-"time", not "3d") can be played in SoH or RetroArch: `Launcher.choose_player` asks (default
-`default_player`: state `player`, else SoH if set up), `--with soh|retroarch` or the GUI's
-"Play with" chips skip it. Config `soh` (program) and optional `soh_data` are
-`MACHINE_KEYS`. SoH turns the ROM into `oot.o2r` (`oot-mq.o2r` for Master Quest) once;
-`soh_launch` passes the ROM on the command line only while that file is missing (with it,
-SoH would ask to re-extract). SoH's data folder is its cwd on Windows and `$SHIP_HOME`
-elsewhere (the AppImage defaults to `~/.local/share/soh`), so the launcher starts it in
-`soh_data_dir` and sets `SHIP_HOME`. Saves: `SohSave` (a `FolderSave`) syncs only the
-top-level `*.sav` in `<data>/Save` (JSON: `file1-3.sav`, `global.sav`) as
-`<ROM stem> (Ship of Harkinian).zip`, emulator `soh`; SoH's `fileN-<time>.bak` and `.temp`
-files are never touched. Save objects carry `emulator`/`exts` (None for RetroArch's), so
-`fetch_remote` looks only at `soh` zips for SoH and at `.srm` for RetroArch, and
-`state.json` keeps SoH's last synced hash as `hash_soh` (`Launcher.hash_key`) beside
-RetroArch's `hash`; `pending_player` says which save a pending upload was. No new RomM
-writes were needed.
+**PC ports** (`ports.py`). Ship of Harkinian (SoH, Ocarina of Time; added 2026-11-17 at
+the user's request, checked against SoH 9.3's source) and 2 Ship 2 Harkinian (2S2H,
+Majora's Mask; added 2026-11-17 at the user's request, checked against 2S2H 5.0.1's source
+and libultraship). Both are HarbourMasters ports on libultraship and behave the same, so
+each is one `Port` value (`SHIP_OF_HARKINIAN`, `TWO_SHIP`, in `PORTS` by key). A port's
+`key` (`soh`, `2ship`) is everything: the `--with` choice, the config key of its program
+(`<key>_data` for its data folder; both `MACHINE_KEYS`), RomM's `emulator` for its saves,
+`hash_<key>` in state and its download folder `<key>/<OS_KEY>/` in APP_HOME. A game is a
+port's when it's on `n64`/`ngc` and its name has the port's `words` ("ocarina"+"time",
+"majora"+"mask") and not "3d" (`Port.plays`, `port_for`); it can then be played in the
+port or RetroArch: `Launcher.choose_player` asks (default `default_player`: state `player`,
+else the port if set up), `--with` or the GUI's "Play with" chips skip it.
 
-**Downloading SoH** (2026-11-17, at the user's request): `setup_soh` (from `ensure_soh`
-and `--setup`) offers "Download it for me" when `find_soh` finds nothing; the GUI asks with
-a Yes/No/Cancel dialog (`GuiApp.pick_soh`) and runs `Launcher.download_soh` before `play`
-on the worker thread. The GUI's settings page (`show_settings`) has a Ship of Harkinian
-field (`soh_entry`, Browse…, a Download button `soh_download` only while it isn't installed,
-status line `soh_status`); Download closes the settings and runs `GuiApp.download_soh`
-(worker thread, progress in the status bar); a cleared field removes `soh` from the config
-and this system's section. `latest_soh_release` reads GitHub's `releases/latest` for
-HarbourMasters/Shipwright and takes the `-Win64.zip` (Windows) or `.appimage` (Linux,
-x86_64 only; nothing for macOS/ARM); the file must come from
-`https://github.com/HarbourMasters/Shipwright/releases/download/` and match the asset's
-`digest` (sha256) when GitHub lists one. `install_soh` puts it in `soh/<OS_KEY>/`
-(`soh_install_dir`, inside APP_HOME so it travels with the folder): the zip is checked for
-unsafe paths, unpacked into `<os>.part`, and the folder holding `soh.exe` is moved in
-without replacing anything; the AppImage is written via `.part` and made executable. An
-installed SoH is never replaced (no updates). Config `soh` is then relative
-(`soh/windows/soh.exe`, `config_path`; `soh_program` resolves it against APP_HOME), and
-its data folder is its own folder on Linux too. No RomM login is sent (it uses
-`core_downloads.http_download`).
+- Archive: the port turns the ROM into `oot.o2r` (`oot-mq.o2r` for Master Quest) / `mm.o2r`
+  once; `Port.launch` passes the ROM on the command line only while that file is missing
+  (with it, the port would extract again). Neither reads a zipped ROM (2S2H's extractor
+  refuses the `PK` header; RomM has the user's Majora's Mask as a `.zip`), so
+  `unpacked_rom` puts the zip's biggest file into `<data>/.romm-launcher-rom/` and
+  `Port.cleanup` removes that after the game closes.
+- Data folder: the cwd on Windows and `$SHIP_HOME` on Linux (libultraship; the AppImages
+  default to `~/.local/share/soh` / `~/.local/share/2ship`), so the launcher starts the port
+  in `Port.data_dir` and sets `SHIP_HOME`.
+- Saves: `PortSave` (a `FolderSave`) syncs the files in `<data>/<save_folder>` that match
+  `save_files`, as `<ROM stem> (<port name>).zip`. SoH: `Save/*.sav` (`file1-3.sav`,
+  `global.sav`; its `fileN-<time>.bak` and `.temp` files are never touched). 2S2H:
+  `saves/fileN.json` and `fileNbackup.json` (the game's backup copies); its
+  `fileN_invalid_<time>.json` and the old `global.json` (2S2H moves its contents into
+  `2ship2harkinian.json` and deletes it) stay out. Save objects carry `emulator`/`exts`
+  (None for RetroArch's), so `fetch_remote` looks only at that port's zips, and
+  `pending_player` says which save a pending upload was. No new RomM writes were needed.
+- Downloading (2026-11-17, at the user's request): `Launcher.setup_port` (from
+  `ensure_port` and `--setup`, which asks for each port) offers "Download it for me" when
+  `Port.find` finds nothing; the GUI asks with a Yes/No/Cancel dialog (`GuiApp.pick_port`)
+  and runs `Launcher.download_port` before `play` on the worker thread. The GUI's settings
+  page (`show_settings`) has a field per port (`port_entries`, Browse…, a Download button in
+  `port_downloads` only while it isn't installed, status line `port_notes` from
+  `port_status`); Download closes the settings and runs `GuiApp.download_port`; a cleared
+  field removes the key from the config and this system's section. `Port.latest_release`
+  reads GitHub's `releases/latest` for the port's `repo` (`HarbourMasters/Shipwright`;
+  2S2H moved to `2ship2harkinian/2ship2harkinian`) and takes the asset ending in the
+  port's `downloads` suffix for this system (SoH: `-win64.zip` / `.appimage`; 2S2H:
+  `-win64.zip` / `-linux.zip`, a zip with `2ship.appimage` in it; x86_64 only, nothing for
+  macOS/ARM); the file must come from `https://github.com/<repo>/releases/download/` and
+  match the asset's `digest` (sha256) when GitHub lists one. `Port.install` writes an
+  AppImage via `.part`; a zip is checked for unsafe paths, unpacked into `<os>.part`
+  without `.pdb` debug symbols (2S2H's is 138 MB), and the folder holding the program
+  (`soh.exe`, `2ship.exe`, or the AppImage, made executable) is moved in without replacing
+  anything. An installed port is never replaced (no updates). Its config path is then
+  relative (`soh/windows/soh.exe`, `config_path`; `Port.program` resolves it against
+  APP_HOME), and its data folder is its own folder on Linux too. No RomM login is sent (it
+  uses `core_downloads.http_download`).
 
 **Two-screen games.** If the core is in `SCREEN_LAYOUTS` (melondsds, melonds, desmume,
 citra; option names/values checked against each core's source), `Launcher.apply_screen_layout`
@@ -265,6 +279,7 @@ romm-launcher/
   roms/<platform>/   downloaded ROMs (cache; RomM has the real copies)
   covers/          cover art for the GUI, <rom id>.png (cache)
   soh/<system>/    Ship of Harkinian when the launcher downloaded it (+ its settings, .o2r, Save/)
+  2ship/<system>/  2 Ship 2 Harkinian likewise (+ mm.o2r, saves/)
 ```
 
 `roms_dir` in config is relative to `APP_HOME` (default `"roms"`; resolve it with

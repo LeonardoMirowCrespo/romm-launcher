@@ -109,9 +109,10 @@ class H(BaseHTTPRequestHandler):
             if name.startswith("badzip"):
                 return self.send(200, make_zip({"other/file.dll": b"x"}), "application/zip")
             return self.send(200, make_zip({name[:-4]: b"CORE:" + name[:-4].encode()}), "application/zip")
-        if u.path == "/repos/HarbourMasters/Shipwright/releases/latest":  # stands in for GitHub
+        if u.path.startswith("/repos/") and u.path.endswith("/releases/latest"):  # stands in for GitHub
+            GH["asked"] = u.path
             return self.send(200, GH["release"])
-        if u.path.startswith("/HarbourMasters/Shipwright/releases/download/"):
+        if "/releases/download/" in u.path:
             SEEN["soh_downloads"] += 1
             return self.send(200, GH["files"][unquote(u.path.rsplit("/", 1)[-1])], "application/octet-stream")
         if u.path == "/assets/frontend/info.zip":
@@ -226,7 +227,7 @@ class H(BaseHTTPRequestHandler):
                                  "platform_fs_slug": slug, "platform_display_name": slug.upper()})
             return self.send(200, {"task_id": "scan-1", "status": "queued", "scan": body})
         q = parse_qs(u.query)
-        assert u.path == "/api/saves" and q["emulator"][0] in ("mupen64plus_next", "citra", "soh"), self.path
+        assert u.path == "/api/saves" and q["emulator"][0] in ("mupen64plus_next", "citra", "soh", "2ship"), self.path
         msg = BytesParser(policy=HTTP).parsebytes(
             b"Content-Type: " + self.headers["Content-Type"].encode() + b"\r\n\r\n" + raw
         )
@@ -455,7 +456,7 @@ mq = games.Game({"id": 51, "name": "The Legend of Zelda: Ocarina of Time - Maste
 check("SoH offered for Ocarina of Time (N64/GC) only", ports.player_choices(oot) == ["soh", "retroarch"]
       and ports.player_choices(mq) == ["soh", "retroarch"] and ports.player_choices(sm64) == []
       and ports.player_choices(oot3d) == [])
-check("Master Quest has its own archive", ports.soh_archive(mq) == "oot-mq.o2r" and ports.soh_archive(oot) == "oot.o2r")
+check("Master Quest has its own archive", ports.SHIP_OF_HARKINIAN.archive_for(mq) == "oot-mq.o2r" and ports.SHIP_OF_HARKINIAN.archive_for(oot) == "oot.o2r")
 check("SoH not set up: RetroArch stays the default", app.default_player(oot) == "retroarch"
       and "player" not in app.state.get("7", {}))
 with contextlib.redirect_stdout(io.StringIO()):
@@ -469,13 +470,13 @@ soh_exe.write_bytes(b"")
 app.config["soh"] = str(soh_exe)
 real_windows = system.IS_WINDOWS
 system.IS_WINDOWS = True
-check("SoH data folder on Windows: the program's folder", ports.soh_data_dir(app.config) == soh_dir)
+check("SoH data folder on Windows: the program's folder", ports.SHIP_OF_HARKINIAN.data_dir(app.config) == soh_dir)
 system.IS_WINDOWS = False
 os.environ["XDG_DATA_HOME"] = str(tmp / "xdg")
-check("SoH data folder on Linux: ~/.local/share/soh (XDG)", ports.soh_data_dir(app.config) == tmp / "xdg" / "soh")
+check("SoH data folder on Linux: ~/.local/share/soh (XDG)", ports.SHIP_OF_HARKINIAN.data_dir(app.config) == tmp / "xdg" / "soh")
 (soh_dir / "shipofharkinian.json").write_text("{}")
-check("SoH data folder on Linux: the program's folder if SoH's files are there", ports.soh_data_dir(app.config) == soh_dir)
-_, _, env = ports.soh_launch(app.config, oot, tmp / "x.z64")
+check("SoH data folder on Linux: the program's folder if SoH's files are there", ports.SHIP_OF_HARKINIAN.data_dir(app.config) == soh_dir)
+_, _, env = ports.SHIP_OF_HARKINIAN.launch(app.config, oot, tmp / "x.z64")
 check("SoH on Linux: SHIP_HOME points at the data folder", env["SHIP_HOME"] == str(soh_dir))
 system.IS_WINDOWS = real_windows
 del os.environ["XDG_DATA_HOME"]
@@ -591,7 +592,7 @@ del app.config["soh"]
 # Downloading SoH: the latest release from (a fake) GitHub, checked, into soh/<system>/.
 ports.GITHUB_API = ports.GITHUB = base.rstrip("/")
 real_home, real_os = paths.APP_HOME, system.OS_KEY
-paths.APP_HOME, paths.SOH_DIR = tmp, tmp / "soh"
+paths.APP_HOME = tmp
 win_zip = make_zip({"SoH-Dewey-Bravo-Win64/soh.exe": b"MZ soh", "SoH-Dewey-Bravo-Win64/soh.o2r": b"port assets",
                     "SoH-Dewey-Bravo-Win64/readme.txt": b"hi"})
 appimage = b"\x7fELF appimage"
@@ -611,7 +612,7 @@ system.OS_KEY = "windows"
 ui.input = lambda prompt: "1"  # "Download it for me"
 out = io.StringIO()
 with contextlib.redirect_stdout(out):
-    got = app.setup_soh()
+    got = app.setup_port(ports.SHIP_OF_HARKINIAN)
 del ui.input
 installed = tmp / "soh" / "windows" / "soh.exe"
 check("SoH downloaded and installed (Windows zip)", got and installed.read_bytes() == b"MZ soh"
@@ -619,33 +620,33 @@ check("SoH downloaded and installed (Windows zip)", got and installed.read_bytes
 check("SoH install: checked, no leftovers", "checked against GitHub's checksum" in out.getvalue()
       and not (tmp / "soh" / "windows.part").exists())
 check("downloaded SoH stored relative to the launcher folder", app.config["soh"] == "soh/windows/soh.exe"
-      and ports.soh_program(app.config) == installed and ports.soh_installed(app.config))
-check("downloaded SoH keeps its data beside it", ports.soh_data_dir(app.config) == installed.parent)
+      and ports.SHIP_OF_HARKINIAN.program(app.config) == installed and ports.SHIP_OF_HARKINIAN.installed(app.config))
+check("downloaded SoH keeps its data beside it", ports.SHIP_OF_HARKINIAN.data_dir(app.config) == installed.parent)
 n = SEEN["soh_downloads"]
 (installed.parent / "Save").mkdir()
 (installed.parent / "Save" / "file1.sav").write_text("mine")
 with contextlib.redirect_stdout(io.StringIO()):
-    got = app.download_soh()
+    got = app.download_port(ports.SHIP_OF_HARKINIAN)
 check("SoH already installed: not downloaded again, nothing replaced", got and SEEN["soh_downloads"] == n
       and installed.read_bytes() == b"MZ soh" and (installed.parent / "Save" / "file1.sav").read_text() == "mine")
-check("an installed SoH is found by setup", ports.find_soh({}) == "soh/windows/soh.exe")
+check("an installed SoH is found by setup", ports.SHIP_OF_HARKINIAN.find({}) == "soh/windows/soh.exe")
 
 system.OS_KEY = "linux"
 real_windows, system.IS_WINDOWS = system.IS_WINDOWS, False
 gh_release({"SoH-Dewey-Bravo.appimage": appimage}, digests={"SoH-Dewey-Bravo.appimage": "0" * 64})
 try:
-    ports.install_soh(ports.latest_soh_release())
+    ports.SHIP_OF_HARKINIAN.install(ports.SHIP_OF_HARKINIAN.latest_release())
     raise SystemExit("FAILED: SoH download with a wrong checksum installed")
-except ports.SohInstallError as e:
+except ports.PortInstallError as e:
     check("SoH download with a wrong checksum refused, nothing written", "checksum" in str(e)
           and not (tmp / "soh" / "linux").exists())
 gh_release({"SoH-Dewey-Bravo.appimage": appimage})
-linux_program = ports.install_soh(ports.latest_soh_release())
+linux_program = ports.SHIP_OF_HARKINIAN.install(ports.SHIP_OF_HARKINIAN.latest_release())
 check("SoH downloaded (Linux AppImage)", linux_program == tmp / "soh" / "linux" / "SoH-Dewey-Bravo.appimage"
       and linux_program.read_bytes() == appimage
       and (system.IS_WINDOWS or os.access(linux_program, os.X_OK)))
 check("Linux: a downloaded SoH keeps its data beside it",
-      ports.soh_data_dir({"soh": "soh/linux/SoH-Dewey-Bravo.appimage"}) == linux_program.parent)
+      ports.SHIP_OF_HARKINIAN.data_dir({"soh": "soh/linux/SoH-Dewey-Bravo.appimage"}) == linux_program.parent)
 system.IS_WINDOWS = real_windows
 
 system.OS_KEY = "windows"
@@ -654,27 +655,175 @@ import shutil
 shutil.rmtree(shutil_tree)
 gh_release({"SoH-Dewey-Bravo-Win64.zip": make_zip({"../evil.exe": b"x", "soh.exe": b"MZ"})})
 try:
-    ports.install_soh(ports.latest_soh_release())
+    ports.SHIP_OF_HARKINIAN.install(ports.SHIP_OF_HARKINIAN.latest_release())
     raise SystemExit("FAILED: SoH zip with an unsafe path installed")
-except ports.SohInstallError as e:
+except ports.PortInstallError as e:
     check("SoH zip with an unsafe path refused", "unsafe" in str(e) and not shutil_tree.exists()
           and not (tmp / "soh" / "evil.exe").exists())
 gh_release({"SoH-Dewey-Bravo-Win64.zip": win_zip})
 GH["release"]["assets"][0]["browser_download_url"] = "https://example.com/HarbourMasters/soh.zip"
 try:
-    ports.latest_soh_release()
+    ports.SHIP_OF_HARKINIAN.latest_release()
     raise SystemExit("FAILED: SoH from another address accepted")
-except ports.SohInstallError as e:
+except ports.PortInstallError as e:
     check("SoH only downloaded from its GitHub releases", "Unexpected download address" in str(e))
 system.OS_KEY = "macos"
 try:
-    ports.latest_soh_release()
+    ports.SHIP_OF_HARKINIAN.latest_release()
     raise SystemExit("FAILED: SoH offered where there's no build")
-except ports.SohInstallError as e:
+except ports.PortInstallError as e:
     check("no SoH download offered where there's no build", "no download" in str(e))
 system.OS_KEY = real_os
 paths.APP_HOME = real_home
 del app.config["soh"]
+
+# ---- 2 Ship 2 Harkinian (a PC port of Majora's Mask) ----------------------------
+TWO = ports.TWO_SHIP
+mm = games.Game({"id": 3, "name": "The Legend of Zelda: Majora's Mask", "platform_fs_slug": "n64",
+                 "fs_name": "Legend of Zelda, The_ Majora's Mask.zip"}, app.config)
+mm3d = games.Game({"id": 52, "name": "The Legend of Zelda: Majora's Mask 3D", "fs_name": "mm3d.3ds",
+                   "platform_fs_slug": "3ds"}, app.config)
+check("2S2H offered for Majora's Mask (N64) only", ports.player_choices(mm) == ["2ship", "retroarch"]
+      and ports.port_for(mm) is TWO and ports.player_choices(mm3d) == []
+      and ports.port_for(oot) is ports.SHIP_OF_HARKINIAN)
+check("2S2H not set up: RetroArch stays the default", app.default_player(mm) == "retroarch")
+with contextlib.redirect_stdout(io.StringIO()):
+    got = app.choose_player(mm, "soh", launch=False)
+check("--with soh doesn't apply to Majora's Mask", got == "retroarch")
+
+mm_rom = mm.rom_dest
+mm_rom.parent.mkdir(parents=True, exist_ok=True)
+mm_rom.write_bytes(make_zip({"Majora's Mask.z64": b"\x80\x37\x12\x40 MM ROM", "readme.txt": b"hi"}))
+two_dir = tmp / "2Ship"
+two_dir.mkdir()
+two_exe = two_dir / "2ship.exe"
+two_exe.write_bytes(b"")
+app.config["2ship"] = str(two_exe)
+real_windows = system.IS_WINDOWS
+system.IS_WINDOWS = False
+os.environ["XDG_DATA_HOME"] = str(tmp / "xdg")
+check("2S2H data folder on Linux: ~/.local/share/2ship (XDG)", TWO.data_dir(app.config) == tmp / "xdg" / "2ship")
+(two_dir / "2ship2harkinian.json").write_text("{}")
+check("2S2H data folder on Linux: the program's folder if its files are there", TWO.data_dir(app.config) == two_dir)
+system.IS_WINDOWS = True
+check("2S2H data folder on Windows: the program's folder", TWO.data_dir(app.config) == two_dir)
+system.IS_WINDOWS = real_windows
+del os.environ["XDG_DATA_HOME"]
+check("2S2H set up: it's the default for Majora's Mask", app.default_player(mm) == "2ship"
+      and app.default_player(oot) == "soh")
+check("2S2H path kept in this system's config section",
+      config.config_for_disk(dict(app.config, **{system.OS_KEY: {}}))[system.OS_KEY]["2ship"] == str(two_exe))
+
+two_saves = two_dir / "saves"
+two_saves.mkdir()
+(two_saves / "file1.json").write_text('{"slot": 1}')
+(two_saves / "file1backup.json").write_text('{"slot": 1, "backup": true}')
+(two_saves / "file2_invalid_1763300000.json").write_text("2S2H couldn't read it")
+(two_saves / "global.json").write_text('{"old": "options"}')
+s_two = app.save_for(mm, mm_rom, "2ship")
+check("2S2H save: the slot files and their backups only",
+      [n for n, _ in s_two.files()] == ["file1.json", "file1backup.json"]
+      and s_two.upload_name == f"{mm_rom.stem} (2 Ship 2 Harkinian).zip" and s_two.emulator == "2ship")
+check("2S2H save: zip hashes like the folder", s_two.hash_of(s_two.read()) == s_two.hash())
+check("SoH's save is still SoH's", ports.SHIP_OF_HARKINIAN.save({"soh": str(soh_exe)}, oot_rom).emulator == "soh")
+
+
+class FakeTwoShip:
+    def __init__(self, args, **kw):
+        launched.append((args, kw, Path(args[-1]).read_bytes() if len(args) > 1 else None))
+        (two_saves / "file2.json").write_text('{"slot": 2}')
+
+    def wait(self):
+        return 0
+
+
+launched.clear()
+subprocess.Popen = FakeTwoShip
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    app.play(mm, player="2ship")
+subprocess.Popen = real_popen
+args, kw, rom_seen = launched[0]
+unpacked = two_dir / ports.ROM_FOLDER / "Majora's Mask.z64"
+check("2S2H started in its folder with the ROM unzipped (it can't read zips)",
+      args == [str(two_exe), str(unpacked)] and kw["cwd"] == str(two_dir)
+      and rom_seen == b"\x80\x37\x12\x40 MM ROM" and "mm.o2r" in out.getvalue())
+check("unzipped ROM removed after the game closed, the zip kept", not (two_dir / ports.ROM_FOLDER).exists()
+      and mm_rom.is_file())
+newest = saves.fetch_remote(c, mm, app.save_for(mm, mm_rom, "2ship"))
+check("2S2H save uploaded after playing, as emulator 2ship", "Save uploaded to RomM." in out.getvalue()
+      and STORE["saves"][-1]["emulator"] == "2ship"
+      and sorted(zipfile.ZipFile(io.BytesIO(newest.data)).namelist()) == ["file1.json", "file1backup.json", "file2.json"]
+      and app.state["3"]["hash_2ship"] == s_two.hash() and app.state["3"]["player"] == "2ship")
+(two_dir / "mm.o2r").write_bytes(b"assets")
+launched.clear()
+subprocess.Popen = FakeTwoShip
+with contextlib.redirect_stdout(io.StringIO()):
+    app.play(mm, player="2ship")
+subprocess.Popen = real_popen
+check("with mm.o2r made, 2S2H starts without the ROM", launched[0][0] == [str(two_exe)])
+
+# RomM's newer 2S2H save replaces the slot files; 2S2H's own other files stay.
+c.upload_save(3, s_two.upload_name, make_zip({"file1.json": '{"slot": 1, "masks": 24}',
+                                              "file3.json": '{"slot": 3}'}), "2ship")
+STORE["saves"][-1]["file_name"] = s_two.upload_name
+with contextlib.redirect_stdout(io.StringIO()):
+    app.play(mm, launch=False, player="2ship")
+check("newer 2S2H save from RomM placed", (two_saves / "file1.json").read_text() == '{"slot": 1, "masks": 24}'
+      and (two_saves / "file3.json").read_text() == '{"slot": 3}' and not (two_saves / "file2.json").exists())
+check("2S2H's invalid-save copies and old global.json untouched",
+      (two_saves / "file2_invalid_1763300000.json").read_text() == "2S2H couldn't read it"
+      and (two_saves / "global.json").read_text() == '{"old": "options"}')
+
+# A failed 2S2H upload is retried as 2S2H's save.
+(two_saves / "file3.json").write_text('{"slot": 3, "day": 2}')
+FLAGS["fail_upload"] = True
+with contextlib.redirect_stdout(io.StringIO()):
+    app.upload(mm, s_two)
+FLAGS["fail_upload"] = False
+check("failed 2S2H upload marked as 2S2H's", app.state["3"]["pending_player"] == "2ship")
+app.state["3"]["player"] = "retroarch"
+with contextlib.redirect_stdout(io.StringIO()):
+    app.retry_pending([mm])
+check("pending 2S2H upload retried as 2S2H's save", app.state["3"]["pending_upload"] is False
+      and app.state["3"]["hash_2ship"] == s_two.hash())
+del app.config["2ship"]
+
+# Downloading 2S2H: from its own GitHub organisation; Windows and Linux both come as zips.
+real_home, real_os = paths.APP_HOME, system.OS_KEY
+paths.APP_HOME = tmp
+system.OS_KEY = "windows"
+two_win = make_zip({"2ship.exe": b"MZ 2ship", "2ship.o2r": b"port assets", "debug/2ship.pdb": b"symbols",
+                    "readme.txt": b"hi"})
+GH["files"] = {"2Ship-Battler-Bravo-Win64.zip": two_win,
+               "2Ship-Battler-Bravo-Linux.zip": make_zip({"2ship.appimage": appimage, "readme.txt": b"hi"})}
+GH["release"] = {"tag_name": "5.0.1", "name": "Battler Bravo 5.0.1", "assets": [
+    {"name": name, "size": len(data), "digest": "sha256:" + util.sha256(data),
+     "browser_download_url": f"{base}2ship2harkinian/2ship2harkinian/releases/download/5.0.1/{name}"}
+    for name, data in GH["files"].items()]}
+ui.input = lambda prompt: "1"  # "Download it for me"
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    got = app.setup_port(TWO)
+del ui.input
+installed = tmp / "2ship" / "windows" / "2ship.exe"
+check("2S2H downloaded from its own GitHub page", got and GH["asked"] == "/repos/2ship2harkinian/2ship2harkinian/releases/latest"
+      and "5.0.1" in out.getvalue())
+check("2S2H installed (Windows zip), debug symbols left out", installed.read_bytes() == b"MZ 2ship"
+      and (installed.parent / "2ship.o2r").read_bytes() == b"port assets"
+      and not (installed.parent / "debug").exists() and app.config["2ship"] == "2ship/windows/2ship.exe"
+      and TWO.data_dir(app.config) == installed.parent)
+system.OS_KEY = "linux"
+real_windows, system.IS_WINDOWS = system.IS_WINDOWS, False
+linux_program = TWO.install(TWO.latest_release())
+check("2S2H downloaded (Linux: the AppImage from its zip)",
+      linux_program == tmp / "2ship" / "linux" / "2ship.appimage" and linux_program.read_bytes() == appimage
+      and (real_windows or os.access(linux_program, os.X_OK))
+      and TWO.data_dir({"2ship": "2ship/linux/2ship.appimage"}) == linux_program.parent)
+system.IS_WINDOWS = real_windows
+system.OS_KEY = real_os
+paths.APP_HOME = real_home
+del app.config["2ship"]
 
 # RomM that refuses Basic auth on writes (CSRF) -> switch to a token.
 FLAGS["csrf"] = True
@@ -1269,23 +1418,27 @@ if window:
 
     gh_release({"SoH-Dewey-Bravo-Win64.zip": win_zip, "SoH-Dewey-Bravo.appimage": appimage})
     window.launcher.config.pop("soh", None)
+    real_home, paths.APP_HOME = paths.APP_HOME, tmp / "gui-home"  # downloads go here, not the real folder
     seen = {}
 
     def download_from_settings():
-        seen.update(note=window.soh_note.cget("text"), download=window.soh_download)
-        window.soh_download.invoke()  # closes the settings and starts the download
+        seen.update(note=window.port_notes["soh"].cget("text"), download=window.port_downloads["soh"],
+                    two_note=window.port_notes["2ship"].cget("text"), two_download=window.port_downloads["2ship"])
+        window.port_downloads["soh"].invoke()  # closes the settings and starts the download
 
     def clear_in_settings():
-        seen.update(note2=window.soh_note.cget("text"), download2=window.soh_download)
-        window.soh_entry.delete(0, "end")
-        find_button(window.soh_entry.winfo_toplevel(), "Save").invoke()
+        seen.update(note2=window.port_notes["soh"].cget("text"), download2=window.port_downloads["soh"])
+        window.port_entries["soh"].delete(0, "end")
+        find_button(window.port_entries["soh"].winfo_toplevel(), "Save").invoke()
 
     try:
         window.root.after(300, download_from_settings)
         window.show_settings()
         check("settings: SoH not set up, Download offered", seen["download"] is not None
               and "Not set up" in seen["note"])
-        check("settings: Download installs SoH", pump(lambda: ports.soh_installed(window.launcher.config)
+        check("settings: 2S2H has its own field and Download", seen["two_download"] is not None
+              and "Not set up" in seen["two_note"] and "2ship" in seen["two_note"])
+        check("settings: Download installs SoH", pump(lambda: ports.SHIP_OF_HARKINIAN.installed(window.launcher.config)
                                                      and not window.busy)
               and "installed" in window.activity.get("1.0", "end"))
         window.root.after(300, clear_in_settings)
@@ -1296,6 +1449,8 @@ if window:
               and "soh" not in util.load_json(paths.CONFIG_FILE, {}).get(system.OS_KEY, {}))
     except gui.tk.TclError as exc:  # a hidden window can't always grab the keyboard
         print(f"skipped: settings dialog ({exc})")
+    check("settings: SoH downloaded into the test folder", (tmp / "gui-home" / "soh" / system.OS_KEY).is_dir())
+    paths.APP_HOME = real_home
     ui.set_ui(ui.TerminalUI())
     window.root.destroy()
 

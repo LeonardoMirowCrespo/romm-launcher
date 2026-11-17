@@ -38,13 +38,12 @@ from .games import (
 from .launcher import Launcher
 from .ports import (
     PLAYERS,
-    SOH,
+    PORTS,
+    RETROARCH,
+    Port,
     config_path,
     player_choices,
-    soh_data_dir,
-    soh_install_dir,
-    soh_installed,
-    soh_program,
+    port_for,
 )
 from .retroarch import FLATPAK_RETROARCH, core_id, retroarch_command, retroarch_installed
 from .romm import LoginError, RommClient, RommError
@@ -87,8 +86,8 @@ PLATFORM_SHORT = {  # RomM's fs_slug → the short name on chips and cover tags
     "wii": "Wii", "psx": "PS1", "ps2": "PS2", "psp": "PSP", "genesis": "Genesis", "megadrive": "Mega Drive",
 }
 LAYOUT_SHORT = {"main": "Main", "both": "Both", "corner": "Corner"}
-PLAYER_TIPS = {"soh": "Ship of Harkinian: the PC version, with widescreen, high resolution and 60 fps",
-               "retroarch": "RetroArch: the original game, in an emulator"}
+PLAYER_TIPS = {**{p.key: f"{p.name}: {p.tip}" for p in PORTS.values()},
+               RETROARCH: "RetroArch: the original game, in an emulator"}
 
 
 def friendly_time(text: str, now: datetime | None = None) -> str:
@@ -900,8 +899,9 @@ class GuiApp:
             self.player_row.pack(anchor="w")
             self._player_chips(players)
             note = "Each keeps its own save."
-            if not soh_installed(self.launcher.config):
-                note += " Ship of Harkinian isn't set up yet: Play offers to download it (or Settings)."
+            port = port_for(game)
+            if not port.installed(self.launcher.config):
+                note += f" {port.name} isn't set up yet: Play offers to download it (or Settings)."
             self.label(box, note, 8, fg=THEME["muted"], anchor="w", wraplength=width,
                        justify="left").pack(fill="x", pady=(self.S(6), 0))
 
@@ -974,28 +974,29 @@ class GuiApp:
         self.v_player.set(player)
         self._player_chips(players)
 
-    def pick_soh(self) -> str | None:
-        """Ship of Harkinian isn't set up (asked on Tk's thread, before playing): "download"
-        to have the launcher download it, "picked" when its program was picked, None to cancel."""
-        exe = IS_WINDOWS
+    def filetypes(self, port: Port) -> list[tuple[str, str]]:
+        return [(port.name, port.exe if IS_WINDOWS else "*.appimage *.AppImage"), ("All files", "*.*")]
+
+    def pick_port(self, port: Port) -> str | None:
+        """A PC port isn't set up (asked on Tk's thread, before playing): "download" to have
+        the launcher download it, "picked" when its program was picked, None to cancel."""
         answer = messagebox.askyesnocancel(
-            APP_NAME, "Ship of Harkinian isn't set up on this computer yet.\n\n"
+            APP_NAME, f"{port.name} isn't set up on this computer yet.\n\n"
             "Yes: download it for you, from its GitHub page, into the launcher's folder.\n"
-            "No: pick the " + ("soh.exe" if exe else ".appimage") + " you already have.", parent=self.root)
+            f"No: pick the {port.exe if IS_WINDOWS else '.appimage'} you already have.", parent=self.root)
         if answer is None:
             return None
         if answer:
             return "download"
-        path = filedialog.askopenfilename(
-            parent=self.root, title="Where is Ship of Harkinian?",
-            filetypes=[("Ship of Harkinian", "soh.exe" if exe else "*.appimage *.AppImage"), ("All files", "*.*")])
+        path = filedialog.askopenfilename(parent=self.root, title=f"Where is {port.name}?",
+                                          filetypes=self.filetypes(port))
         if not path:
             return None
         cfg = self.launcher.config
         cfg.setdefault(system.OS_KEY, {})
-        cfg["soh"] = config_path(Path(path))
+        cfg[port.key] = config_path(Path(path))
         self.launcher.save_config()
-        self.log(f"Ship of Harkinian: {path}  (saves: {soh_data_dir(cfg) / 'Save'})", "ok")
+        self.log(f"{port.name}: {path}  (saves: {port.saves_dir(cfg)})", "ok")
         return "picked"
 
     def play(self, game: Game, launch: bool = True) -> None:
@@ -1006,9 +1007,10 @@ class GuiApp:
         choices = screen_choices(game)
         screen = self.v_layout.get() if choices else None
         player = self.v_player.get() if player_choices(game) else None
+        port = PORTS.get(player)
         setup = None
-        if player == SOH and launch and not soh_installed(self.launcher.config):
-            setup = self.pick_soh()
+        if port and launch and not port.installed(self.launcher.config):
+            setup = self.pick_port(port)
             if setup is None:
                 return
         self.busy, self.playing = True, game
@@ -1029,7 +1031,7 @@ class GuiApp:
             self.set_status("Ready.")
 
         def task():
-            if setup == "download" and not self.launcher.download_soh():
+            if setup == "download" and not self.launcher.download_port(port):
                 return
             self.launcher.play(game, launch=launch, screen=screen, player=player)
 
@@ -1396,35 +1398,39 @@ class GuiApp:
         self.check(dlg, "Download missing cores automatically (from libretro)", auto).pack(anchor="w")
         self.check(dlg, "Show the controller's touch pointer (DS/3DS)", pointer).pack(anchor="w", pady=(self.S(4), 0))
 
-        # Ship of Harkinian: where it is, or have the launcher download it.
-        self.label(dlg, "Ship of Harkinian (Ocarina of Time as a PC game)", 9,
-                   fg=THEME["muted"]).pack(anchor="w", pady=(self.S(18), 0))
-        soh_var = tk.StringVar(value=cfg.get("soh", ""))
-        soh_row = tk.Frame(dlg, bg=THEME["panel"])
-        soh_row.pack(fill="x", pady=(self.S(2), self.S(4)))
-        self.soh_entry = self.entry(soh_row, soh_var, width=48)
-        self.soh_entry.pack(side="left", fill="x", expand=True, ipady=self.S(4))
-        self.soh_note = self.label(dlg, self.soh_status(cfg), 8, fg=THEME["muted"], anchor="w",
-                                   wraplength=self.S(520), justify="left")
-        self.soh_note.pack(fill="x")
+        # The PC ports: where each one is, or have the launcher download it.
+        port_vars, self.port_entries, self.port_notes, self.port_downloads = {}, {}, {}, {}
 
-        def browse_soh():
-            path = filedialog.askopenfilename(
-                parent=dlg, title="Where is Ship of Harkinian?",
-                filetypes=[("Ship of Harkinian", "soh.exe" if IS_WINDOWS else "*.appimage *.AppImage"),
-                           ("All files", "*.*")])
-            if path:
-                soh_var.set(config_path(Path(path)))
+        def port_field(port: Port) -> None:
+            self.label(dlg, f"{port.name} ({port.game} as a PC game)", 9,
+                       fg=THEME["muted"]).pack(anchor="w", pady=(self.S(18), 0))
+            var = port_vars[port.key] = tk.StringVar(value=cfg.get(port.key, ""))
+            row = tk.Frame(dlg, bg=THEME["panel"])
+            row.pack(fill="x", pady=(self.S(2), self.S(4)))
+            self.port_entries[port.key] = self.entry(row, var, width=48)
+            self.port_entries[port.key].pack(side="left", fill="x", expand=True, ipady=self.S(4))
+            self.port_notes[port.key] = self.label(dlg, self.port_status(port, cfg), 8, fg=THEME["muted"],
+                                                   anchor="w", wraplength=self.S(520), justify="left")
+            self.port_notes[port.key].pack(fill="x")
 
-        def download_soh():
-            dlg.destroy()
-            self.download_soh()
+            def browse():
+                path = filedialog.askopenfilename(parent=dlg, title=f"Where is {port.name}?",
+                                                  filetypes=self.filetypes(port))
+                if path:
+                    var.set(config_path(Path(path)))
 
-        self.soh_download = None
-        if not soh_installed(cfg):
-            self.soh_download = self.button(soh_row, "Download", download_soh)
-            self.soh_download.pack(side="right", padx=(self.S(8), 0))
-        self.button(soh_row, "Browse…", browse_soh).pack(side="right", padx=(self.S(8), 0))
+            def download():
+                dlg.destroy()
+                self.download_port(port)
+
+            self.port_downloads[port.key] = None
+            if not port.installed(cfg):
+                self.port_downloads[port.key] = self.button(row, "Download", download)
+                self.port_downloads[port.key].pack(side="right", padx=(self.S(8), 0))
+            self.button(row, "Browse…", browse).pack(side="right", padx=(self.S(8), 0))
+
+        for port in PORTS.values():
+            port_field(port)
 
         def detect():
             self.launcher.auto_setup_retroarch()
@@ -1444,19 +1450,21 @@ class GuiApp:
                 cfg[system.OS_KEY].pop("roms_dir", None)
                 cfg["roms_dir"] = roms
             cfg["auto_install_cores"], cfg["show_touch_pointer"] = auto.get(), pointer.get()
-            soh = soh_var.get().strip().strip('"')
-            if soh:
-                program = Path(soh).expanduser()
-                cfg["soh"] = config_path(program if program.is_absolute() else paths.APP_HOME / program)
-            else:  # cleared: Ship of Harkinian isn't used on this computer
-                cfg.pop("soh", None)
-                cfg[system.OS_KEY].pop("soh", None)
+            for port in PORTS.values():
+                text = port_vars[port.key].get().strip().strip('"')
+                if text:
+                    program = Path(text).expanduser()
+                    cfg[port.key] = config_path(program if program.is_absolute() else paths.APP_HOME / program)
+                else:  # cleared: this port isn't used on this computer
+                    cfg.pop(port.key, None)
+                    cfg[system.OS_KEY].pop(port.key, None)
             self.launcher.save_config()
             dlg.destroy()
             if not retroarch_installed(cfg["retroarch"]):
                 self.log(f"RetroArch not found: {cfg['retroarch']}", "warn")
-            if cfg.get("soh") and not soh_installed(cfg):
-                self.log(f"Ship of Harkinian not found: {cfg['soh']}", "warn")
+            for port in PORTS.values():
+                if cfg.get(port.key) and not port.installed(cfg):
+                    self.log(f"{port.name} not found: {cfg[port.key]}", "warn")
             self.refresh_local()
             self.show_details(self.selected)
 
@@ -1468,33 +1476,33 @@ class GuiApp:
         self._run_dialog(dlg)
 
     @staticmethod
-    def soh_status(cfg: dict) -> str:
-        """One line about Ship of Harkinian for the settings page."""
-        if soh_installed(cfg):
-            return f"Ready. Its settings and saves are in {soh_data_dir(cfg)}"
-        if cfg.get("soh"):
-            return f"Not found at {soh_program(cfg)}. Browse to it, or clear the field and Download."
+    def port_status(port: Port, cfg: dict) -> str:
+        """One line about a PC port for the settings page."""
+        if port.installed(cfg):
+            return f"Ready. Its settings and saves are in {port.data_dir(cfg)}"
+        if cfg.get(port.key):
+            return f"Not found at {port.program(cfg)}. Browse to it, or clear the field and Download."
         return (f"Not set up. Download installs the latest version from its GitHub page into "
-                f"{soh_install_dir()}, checked against GitHub's checksum.")
+                f"{port.install_dir()}, checked against GitHub's checksum.")
 
-    def download_soh(self) -> None:
-        """Have the launcher download Ship of Harkinian (on a worker thread; progress in the status bar)."""
+    def download_port(self, port: Port) -> None:
+        """Have the launcher download a PC port (on a worker thread; progress in the status bar)."""
         if self.busy:
             return
         self.busy = True
         self.show_details(self.selected)
         self.log("")
-        self.log("Ship of Harkinian", "info")
+        self.log(port.name, "info")
 
         def done(result):
             self.busy = False
             if isinstance(result, BaseException) and not isinstance(result, Quit):
                 self.log(f"Something went wrong: {result!r}", "fail")
             self.show_details(self.selected)
-            self.set_status("Ready." if result is True else "Ship of Harkinian wasn't installed.",
+            self.set_status("Ready." if result is True else f"{port.name} wasn't installed.",
                             "muted" if result is True else "warn")
 
-        self.run_task(self.launcher.download_soh, done)
+        self.run_task(lambda: self.launcher.download_port(port), done)
 
     def on_close(self) -> None:
         if self.busy and getattr(self, "playing", None) and not messagebox.askyesno(
