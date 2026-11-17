@@ -29,6 +29,7 @@ from rommlauncher import (  # noqa: E402
     gui,
     launcher,
     paths,
+    ports,
     retroarch,
     romm,
     saves,
@@ -56,7 +57,9 @@ PLATFORMS = [{"id": 1, "fs_slug": "n64", "display_name": "Nintendo 64"},
              {"id": 3, "fs_slug": "nds", "display_name": "Nintendo DS"}]
 AUTH = "Basic " + base64.b64encode(b"leo:pw").decode()
 FLAGS = {"old": False, "csrf": False, "fail_upload": False, "fail_save_download": False}
-SEEN = {"rom_downloads": 0, "token": 0, "destructive": 0, "core_downloads": 0, "scans": 0, "cancels": 0}
+SEEN = {"rom_downloads": 0, "token": 0, "destructive": 0, "core_downloads": 0, "scans": 0, "cancels": 0,
+        "soh_downloads": 0}
+GH = {"release": {}, "files": {}}  # the fake GitHub's latest SoH release and its files
 
 
 def make_png(w, h):
@@ -106,6 +109,11 @@ class H(BaseHTTPRequestHandler):
             if name.startswith("badzip"):
                 return self.send(200, make_zip({"other/file.dll": b"x"}), "application/zip")
             return self.send(200, make_zip({name[:-4]: b"CORE:" + name[:-4].encode()}), "application/zip")
+        if u.path == "/repos/HarbourMasters/Shipwright/releases/latest":  # stands in for GitHub
+            return self.send(200, GH["release"])
+        if u.path.startswith("/HarbourMasters/Shipwright/releases/download/"):
+            SEEN["soh_downloads"] += 1
+            return self.send(200, GH["files"][unquote(u.path.rsplit("/", 1)[-1])], "application/octet-stream")
         if u.path == "/assets/frontend/info.zip":
             return self.send(200, make_zip({
                 "mgba_libretro.info": b'corename = "mGBA"\n',
@@ -218,7 +226,7 @@ class H(BaseHTTPRequestHandler):
                                  "platform_fs_slug": slug, "platform_display_name": slug.upper()})
             return self.send(200, {"task_id": "scan-1", "status": "queued", "scan": body})
         q = parse_qs(u.query)
-        assert u.path == "/api/saves" and q["emulator"][0] in ("mupen64plus_next", "citra"), self.path
+        assert u.path == "/api/saves" and q["emulator"][0] in ("mupen64plus_next", "citra", "soh"), self.path
         msg = BytesParser(policy=HTTP).parsebytes(
             b"Content-Type: " + self.headers["Content-Type"].encode() + b"\r\n\r\n" + raw
         )
@@ -228,7 +236,7 @@ class H(BaseHTTPRequestHandler):
             "id": sid, "rom_id": int(q["rom_id"][0]), "file_name": part.get_filename(),
             "file_extension": part.get_filename().rsplit(".", 1)[-1],
             "updated_at": f"2026-11-14T12:00:{sid:02d}Z", "download_path": f"/api/raw/x/{sid}",
-            "missing_from_fs": False, "emulator": "mupen64plus_next",
+            "missing_from_fs": False, "emulator": q["emulator"][0],
         })
         STORE["files"][sid] = part.get_payload(decode=True)
         self.send(200, STORE["saves"][-1])
@@ -438,6 +446,235 @@ check("new save uploaded on close", "Save uploaded to RomM." in log
       and saves.fetch_remote(c, sm64, saves.FileSave(sm64_save)).data == b"M" * 512
       and app.state["8"]["hash"] == util.sha256(b"M" * 512))
 sm64.rom_dest.unlink()  # later tests expect only Ocarina of Time on this computer
+
+# ---- Ship of Harkinian (a PC port of Ocarina of Time) ---------------------------
+oot3d = games.Game({"id": 50, "name": "The Legend of Zelda: Ocarina of Time 3D", "fs_name": "oot3d.3ds",
+                    "platform_fs_slug": "3ds"}, app.config)
+mq = games.Game({"id": 51, "name": "The Legend of Zelda: Ocarina of Time - Master Quest", "fs_name": "mq.iso",
+                 "platform_fs_slug": "ngc"}, app.config)
+check("SoH offered for Ocarina of Time (N64/GC) only", ports.player_choices(oot) == ["soh", "retroarch"]
+      and ports.player_choices(mq) == ["soh", "retroarch"] and ports.player_choices(sm64) == []
+      and ports.player_choices(oot3d) == [])
+check("Master Quest has its own archive", ports.soh_archive(mq) == "oot-mq.o2r" and ports.soh_archive(oot) == "oot.o2r")
+check("SoH not set up: RetroArch stays the default", app.default_player(oot) == "retroarch"
+      and "player" not in app.state.get("7", {}))
+with contextlib.redirect_stdout(io.StringIO()):
+    got = app.choose_player(sm64, "soh")
+check("other games ignore --with soh", got == "retroarch")
+
+soh_dir = tmp / "SoH"
+soh_dir.mkdir()
+soh_exe = soh_dir / "soh.exe"
+soh_exe.write_bytes(b"")
+app.config["soh"] = str(soh_exe)
+real_windows = system.IS_WINDOWS
+system.IS_WINDOWS = True
+check("SoH data folder on Windows: the program's folder", ports.soh_data_dir(app.config) == soh_dir)
+system.IS_WINDOWS = False
+os.environ["XDG_DATA_HOME"] = str(tmp / "xdg")
+check("SoH data folder on Linux: ~/.local/share/soh (XDG)", ports.soh_data_dir(app.config) == tmp / "xdg" / "soh")
+(soh_dir / "shipofharkinian.json").write_text("{}")
+check("SoH data folder on Linux: the program's folder if SoH's files are there", ports.soh_data_dir(app.config) == soh_dir)
+_, _, env = ports.soh_launch(app.config, oot, tmp / "x.z64")
+check("SoH on Linux: SHIP_HOME points at the data folder", env["SHIP_HOME"] == str(soh_dir))
+system.IS_WINDOWS = real_windows
+del os.environ["XDG_DATA_HOME"]
+check("SoH set up: it's the default for Ocarina of Time", app.default_player(oot) == "soh")
+check("SoH path kept in this system's config section",
+      config.config_for_disk(dict(app.config, **{system.OS_KEY: {}}))[system.OS_KEY]["soh"] == str(soh_exe))
+
+soh_saves = soh_dir / "Save"
+soh_saves.mkdir()
+(soh_saves / "file1.sav").write_text('{"slot": 1}')
+(soh_saves / "global.sav").write_text('{"global": 1}')
+(soh_saves / "file2-1763300000.bak").write_text("SoH's own backup")
+(soh_saves / "file1.sav.temp").write_text("half written")
+oot_rom = oot.find_local_rom()
+s_soh = app.save_for(oot, oot_rom, "soh")
+check("SoH save: the .sav files only", [n for n, _ in s_soh.files()] == ["file1.sav", "global.sav"]
+      and s_soh.upload_name == f"{oot_rom.stem} (Ship of Harkinian).zip")
+check("SoH save: zip hashes like the folder", s_soh.hash_of(s_soh.read()) == s_soh.hash())
+with contextlib.redirect_stdout(io.StringIO()):
+    got = app.upload(oot, s_soh)
+check("SoH save uploaded as emulator soh", got and STORE["saves"][-1]["emulator"] == "soh")
+check("SoH sync tracked apart from RetroArch's", app.state["7"]["hash_soh"] == s_soh.hash()
+      and app.state["7"]["hash"] == util.sha256(b"E" * 296960))
+check("RetroArch still gets its .srm, not SoH's zip",
+      saves.fetch_remote(c, oot, saves.FileSave(local_save)).data == b"E" * 296960)
+
+# RomM got a newer SoH save (another computer): it replaces the .sav files, keeps SoH's own files.
+c.upload_save(7, s_soh.upload_name, make_zip({"file1.sav": '{"slot": 1, "hearts": 9}', "global.sav": "{}",
+                                             "file3.sav": '{"slot": 3}', "../evil.sav": "x"}), "soh")
+STORE["saves"][-1]["file_name"] = s_soh.upload_name
+got = None
+with contextlib.redirect_stdout(io.StringIO()):
+    try:
+        app.play(oot, launch=False, player="soh")
+    except romm.RommError as e:
+        got = str(e)
+check("SoH save zip with an unsafe path refused", got and "unsafe" in got
+      and (soh_saves / "file1.sav").read_text() == '{"slot": 1}')
+STORE["files"][len(STORE["saves"])] = make_zip({"file1.sav": '{"slot": 1, "hearts": 9}', "global.sav": "{}",
+                                                "file3.sav": '{"slot": 3}'})
+with contextlib.redirect_stdout(io.StringIO()):
+    app.play(oot, launch=False, player="soh")
+check("newer SoH save from RomM placed", (soh_saves / "file1.sav").read_text() == '{"slot": 1, "hearts": 9}'
+      and (soh_saves / "file3.sav").read_text() == '{"slot": 3}'
+      and (soh_saves / "global.sav").read_text() == "{}")
+check("SoH's own .bak and .temp files untouched", (soh_saves / "file2-1763300000.bak").read_text() == "SoH's own backup"
+      and (soh_saves / "file1.sav.temp").read_text() == "half written" and not list(soh_saves.glob("*.romm-new")))
+check("replaced SoH save backed up as a zip", any(
+    b.suffix == ".zip" and zipfile.ZipFile(b).read("file1.sav") == b'{"slot": 1}'
+    for b in (paths.BACKUP_DIR / "7").glob("*replaced-by-romm*")))
+check("the choice of SoH is remembered", app.state["7"]["player"] == "soh")
+
+# The question, when nothing says which: Enter keeps last time's, 2 is RetroArch.
+ui.input = lambda prompt: ""
+with contextlib.redirect_stdout(io.StringIO()):
+    got = app.choose_player(oot)
+check("play-with question: Enter takes last time's", got == "soh")
+ui.input = lambda prompt: "2"
+with contextlib.redirect_stdout(io.StringIO()):
+    got = app.choose_player(oot)
+check("play-with question: RetroArch picked and remembered", got == "retroarch"
+      and app.default_player(oot) == "retroarch")
+del ui.input
+app.state["7"]["player"] = "soh"
+
+
+class FakeSoh:
+    def __init__(self, args, **kw):
+        launched.append((args, kw))
+        (soh_saves / "file2.sav").write_text('{"slot": 2}')
+
+    def wait(self):
+        return 0
+
+
+launched.clear()
+subprocess.Popen = FakeSoh
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    app.play(oot, player="soh")
+subprocess.Popen = real_popen
+args, kw = launched[0]
+check("SoH started in its folder, given the ROM to make oot.o2r", args == [str(soh_exe), str(oot_rom)]
+      and kw["cwd"] == str(soh_dir) and "oot.o2r" in out.getvalue())
+newest = saves.fetch_remote(c, oot, app.save_for(oot, oot_rom, "soh"))
+check("SoH save uploaded after playing", "Save uploaded to RomM." in out.getvalue()
+      and "file2.sav" in zipfile.ZipFile(io.BytesIO(newest.data)).namelist()
+      and app.state["7"]["hash_soh"] == s_soh.hash())
+(soh_dir / "oot.o2r").write_bytes(b"assets")
+launched.clear()
+subprocess.Popen = FakeSoh
+with contextlib.redirect_stdout(io.StringIO()):
+    app.play(oot, player="soh")
+subprocess.Popen = real_popen
+check("with oot.o2r made, SoH starts without the ROM", launched[0][0] == [str(soh_exe)])
+
+# A failed SoH upload is retried as SoH's save, even after switching to RetroArch.
+(soh_saves / "file2.sav").write_text('{"slot": 2, "rupees": 99}')
+FLAGS["fail_upload"] = True
+with contextlib.redirect_stdout(io.StringIO()):
+    app.upload(oot, s_soh)
+FLAGS["fail_upload"] = False
+app.state["7"]["player"] = "retroarch"
+with contextlib.redirect_stdout(io.StringIO()):
+    app.retry_pending(library)
+check("pending SoH upload retried as SoH's save", app.state["7"]["pending_upload"] is False
+      and app.state["7"]["hash_soh"] == s_soh.hash()
+      and saves.fetch_remote(c, oot, saves.FileSave(local_save)).data == b"E" * 296960)
+app.state["7"]["player"] = "soh"
+util.save_json(paths.STATE_FILE, app.state)
+del app.config["soh"]
+
+# Downloading SoH: the latest release from (a fake) GitHub, checked, into soh/<system>/.
+ports.GITHUB_API = ports.GITHUB = base.rstrip("/")
+real_home, real_os = paths.APP_HOME, system.OS_KEY
+paths.APP_HOME, paths.SOH_DIR = tmp, tmp / "soh"
+win_zip = make_zip({"SoH-Dewey-Bravo-Win64/soh.exe": b"MZ soh", "SoH-Dewey-Bravo-Win64/soh.o2r": b"port assets",
+                    "SoH-Dewey-Bravo-Win64/readme.txt": b"hi"})
+appimage = b"\x7fELF appimage"
+
+
+def gh_release(files, digests=None):
+    GH["files"] = files
+    GH["release"] = {"tag_name": "9.3.1", "name": "Dewey Bravo 9.3.1", "assets": [
+        {"name": name, "size": len(data), "digest": "sha256:" + (digests or {}).get(name, util.sha256(data)),
+         "browser_download_url": f"{base}HarbourMasters/Shipwright/releases/download/9.3.1/{name}"}
+        for name, data in files.items()] + [{"name": "SoH-Dewey-Bravo-Mac.zip", "size": 1,
+                                             "browser_download_url": f"{base}x/Mac.zip"}]}
+
+
+gh_release({"SoH-Dewey-Bravo-Win64.zip": win_zip, "SoH-Dewey-Bravo.appimage": appimage})
+system.OS_KEY = "windows"
+ui.input = lambda prompt: "1"  # "Download it for me"
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    got = app.setup_soh()
+del ui.input
+installed = tmp / "soh" / "windows" / "soh.exe"
+check("SoH downloaded and installed (Windows zip)", got and installed.read_bytes() == b"MZ soh"
+      and (installed.parent / "soh.o2r").read_bytes() == b"port assets" and "9.3.1" in out.getvalue())
+check("SoH install: checked, no leftovers", "checked against GitHub's checksum" in out.getvalue()
+      and not (tmp / "soh" / "windows.part").exists())
+check("downloaded SoH stored relative to the launcher folder", app.config["soh"] == "soh/windows/soh.exe"
+      and ports.soh_program(app.config) == installed and ports.soh_installed(app.config))
+check("downloaded SoH keeps its data beside it", ports.soh_data_dir(app.config) == installed.parent)
+n = SEEN["soh_downloads"]
+(installed.parent / "Save").mkdir()
+(installed.parent / "Save" / "file1.sav").write_text("mine")
+with contextlib.redirect_stdout(io.StringIO()):
+    got = app.download_soh()
+check("SoH already installed: not downloaded again, nothing replaced", got and SEEN["soh_downloads"] == n
+      and installed.read_bytes() == b"MZ soh" and (installed.parent / "Save" / "file1.sav").read_text() == "mine")
+check("an installed SoH is found by setup", ports.find_soh({}) == "soh/windows/soh.exe")
+
+system.OS_KEY = "linux"
+real_windows, system.IS_WINDOWS = system.IS_WINDOWS, False
+gh_release({"SoH-Dewey-Bravo.appimage": appimage}, digests={"SoH-Dewey-Bravo.appimage": "0" * 64})
+try:
+    ports.install_soh(ports.latest_soh_release())
+    raise SystemExit("FAILED: SoH download with a wrong checksum installed")
+except ports.SohInstallError as e:
+    check("SoH download with a wrong checksum refused, nothing written", "checksum" in str(e)
+          and not (tmp / "soh" / "linux").exists())
+gh_release({"SoH-Dewey-Bravo.appimage": appimage})
+linux_program = ports.install_soh(ports.latest_soh_release())
+check("SoH downloaded (Linux AppImage)", linux_program == tmp / "soh" / "linux" / "SoH-Dewey-Bravo.appimage"
+      and linux_program.read_bytes() == appimage
+      and (system.IS_WINDOWS or os.access(linux_program, os.X_OK)))
+check("Linux: a downloaded SoH keeps its data beside it",
+      ports.soh_data_dir({"soh": "soh/linux/SoH-Dewey-Bravo.appimage"}) == linux_program.parent)
+system.IS_WINDOWS = real_windows
+
+system.OS_KEY = "windows"
+shutil_tree = tmp / "soh" / "windows"
+import shutil
+shutil.rmtree(shutil_tree)
+gh_release({"SoH-Dewey-Bravo-Win64.zip": make_zip({"../evil.exe": b"x", "soh.exe": b"MZ"})})
+try:
+    ports.install_soh(ports.latest_soh_release())
+    raise SystemExit("FAILED: SoH zip with an unsafe path installed")
+except ports.SohInstallError as e:
+    check("SoH zip with an unsafe path refused", "unsafe" in str(e) and not shutil_tree.exists()
+          and not (tmp / "soh" / "evil.exe").exists())
+gh_release({"SoH-Dewey-Bravo-Win64.zip": win_zip})
+GH["release"]["assets"][0]["browser_download_url"] = "https://example.com/HarbourMasters/soh.zip"
+try:
+    ports.latest_soh_release()
+    raise SystemExit("FAILED: SoH from another address accepted")
+except ports.SohInstallError as e:
+    check("SoH only downloaded from its GitHub releases", "Unexpected download address" in str(e))
+system.OS_KEY = "macos"
+try:
+    ports.latest_soh_release()
+    raise SystemExit("FAILED: SoH offered where there's no build")
+except ports.SohInstallError as e:
+    check("no SoH download offered where there's no build", "no download" in str(e))
+system.OS_KEY = real_os
+paths.APP_HOME = real_home
+del app.config["soh"]
 
 # RomM that refuses Basic auth on writes (CSRF) -> switch to a token.
 FLAGS["csrf"] = True
@@ -978,6 +1215,11 @@ if window:
     window.select(oot)
     check("details for the selected game", window.play_button is not None
           and window.play_button.text.endswith("Play") and window.play_button.enabled)
+    check("Ocarina of Time: play-with chips, last choice selected",
+          [c.text for c in window.player_row.winfo_children()] == ["Ship of Harkinian", "RetroArch"]
+          and window.v_player.get() == "soh")
+    window.player_row.winfo_children()[1].invoke()
+    check("play-with chip picks RetroArch", window.v_player.get() == "retroarch")
     window.select(ds)
     check("DS game: layout choices shown", window.v_layout.get() in ("main", "both", "corner")
           and len(window.layout_row.winfo_children()) == 3)
@@ -1015,6 +1257,45 @@ if window:
               and window.list_picked == ["Super Nintendo Entertainment System"])
     except gui.tk.TclError as exc:  # a hidden window can't always grab the keyboard
         print(f"skipped: list dialog ({exc})")
+    # Settings: Ship of Harkinian can be downloaded from there, and cleared again.
+    def find_button(widget, text):
+        for child in widget.winfo_children():
+            if isinstance(child, gui.tk.Button) and child.cget("text") == text:
+                return child
+            found = find_button(child, text)
+            if found:
+                return found
+        return None
+
+    gh_release({"SoH-Dewey-Bravo-Win64.zip": win_zip, "SoH-Dewey-Bravo.appimage": appimage})
+    window.launcher.config.pop("soh", None)
+    seen = {}
+
+    def download_from_settings():
+        seen.update(note=window.soh_note.cget("text"), download=window.soh_download)
+        window.soh_download.invoke()  # closes the settings and starts the download
+
+    def clear_in_settings():
+        seen.update(note2=window.soh_note.cget("text"), download2=window.soh_download)
+        window.soh_entry.delete(0, "end")
+        find_button(window.soh_entry.winfo_toplevel(), "Save").invoke()
+
+    try:
+        window.root.after(300, download_from_settings)
+        window.show_settings()
+        check("settings: SoH not set up, Download offered", seen["download"] is not None
+              and "Not set up" in seen["note"])
+        check("settings: Download installs SoH", pump(lambda: ports.soh_installed(window.launcher.config)
+                                                     and not window.busy)
+              and "installed" in window.activity.get("1.0", "end"))
+        window.root.after(300, clear_in_settings)
+        window.show_settings()
+        check("settings: installed SoH shown as ready, no Download", seen["download2"] is None
+              and seen["note2"].startswith("Ready"))
+        check("settings: clearing the field stops using SoH", "soh" not in window.launcher.config
+              and "soh" not in util.load_json(paths.CONFIG_FILE, {}).get(system.OS_KEY, {}))
+    except gui.tk.TclError as exc:  # a hidden window can't always grab the keyboard
+        print(f"skipped: settings dialog ({exc})")
     ui.set_ui(ui.TerminalUI())
     window.root.destroy()
 

@@ -15,6 +15,7 @@ from . import system
 from .config import load_config, migrate_flat_config, migrate_legacy_dirs, roms_root
 from .gui import run_gui
 from .launcher import Launcher
+from .ports import RETROARCH, SOH, soh_data_dir
 from .retroarch import retroarch_command
 from .romm import RommError
 from .system import APP_NAME, OS_NAMES
@@ -33,10 +34,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--screen", choices=("main", "both", "corner"),
                         help="for two-screen games (DS, 3DS), without asking: main screen only, both "
                              "screens, or main screen + small touch screen in the bottom-right corner")
+    parser.add_argument("--with", choices=(SOH, RETROARCH), dest="player",
+                        help="for Ocarina of Time (N64/GameCube), without asking: play it in Ship of "
+                             "Harkinian (soh) or RetroArch")
     parser.add_argument("--add", nargs="+", metavar="FILE", type=Path,
                         help="add game files you own (your own cartridge dumps, homebrew) to RomM")
     parser.add_argument("--gui", action="store_true", help="open the launcher in a window instead of the terminal")
-    parser.add_argument("--setup", action="store_true", help="change RomM address, login and RetroArch paths")
+    parser.add_argument("--setup", action="store_true",
+                        help="change RomM address, login, RetroArch paths and Ship of Harkinian")
     parser.add_argument("--paths", "--backups", action="store_true", dest="paths",
                         help="show where settings, ROMs and save backups are kept")
     args = parser.parse_args(argv)
@@ -56,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
             ("Save backups", paths.BACKUP_DIR),
             ("RetroArch", " ".join(retroarch_command(cfg["retroarch"]))),
             ("RetroArch saves", Path(cfg["saves_dir"]).expanduser()),
-        ):
+        ) + ((("Ship of Harkinian", cfg["soh"]), ("SoH saves", soh_data_dir(cfg) / "Save")) if cfg.get("soh") else ()):
             print(f"  {label + ':':<17}{path}")
         if system.OS_KEY not in cfg:
             print(f"  RetroArch isn't set up on {OS_NAMES[system.OS_KEY]} yet; you'll be asked at the next start.")
@@ -107,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             app.upload_now(game)
         else:
-            app.play(game, launch=not args.no_launch, screen=args.screen)
+            app.play(game, launch=not args.no_launch, screen=args.screen, player=args.player)
         print()
         return 0
     except Quit:

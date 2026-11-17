@@ -71,6 +71,9 @@ def citra_save_folder(game: "Game", rom_file: Path) -> Path | None:
 class FileSave:
     """A save that is one file, like RetroArch's .srm files."""
 
+    emulator: str | None = None  # RomM's "emulator" for it; None: the game's core
+    exts: list[str] | None = None  # which saves in RomM are this kind; None: the platform's
+
     def __init__(self, path: Path):
         self.path = path
         self.location = path
@@ -106,6 +109,8 @@ class FolderSave:
     hash whether it's a folder here or a zip from RomM."""
 
     ZIP_DATE = (1980, 1, 1, 0, 0, 0)
+    emulator: str | None = None
+    exts: list[str] | None = None
 
     def __init__(self, folder: Path, upload_name: str):
         self.path = folder
@@ -208,7 +213,7 @@ class RemoteSave:
 
 
 def fetch_remote(client: RommClient, game: Game, save: "FileSave | FolderSave") -> RemoteSave:
-    info = client.newest_save(game.id, game.save_exts)
+    info = client.newest_save(game.id, save.exts or game.save_exts, save.emulator)
     if not info:
         return RemoteSave(None, None)
     data = client.download_save(info)

@@ -12,6 +12,8 @@ on another.
 - Your saves are never thrown away: anything that gets replaced is backed up first.
 - Works offline with games you've already downloaded; saves upload the next time you're online.
 - Add games you own (your own cartridge dumps) to RomM from the launcher.
+- Plays Ocarina of Time in [Ship of Harkinian](https://www.shipofharkinian.com), the PC port,
+  if you like (widescreen, high resolution, 60 fps), with its saves in RomM too.
 
 ## What you need
 
@@ -57,6 +59,7 @@ Opens the launcher as a window, like a game store's library:
   the **installed** ones, or **one platform** (N64, DS, …).
 - Click a game for its details on the right: **Play** (or double-click the cover),
   **Download only**, **Upload save**, for DS/3DS games the **screens** (main, both, corner),
+  for Ocarina of Time **Play with** (Ship of Harkinian or RetroArch),
   when you last played and synced, and what RomM knows about the game: release year, genre,
   rating, modes, series, region and its description. The game you played last is selected
   at the start.
@@ -69,7 +72,8 @@ Opens the launcher as a window, like a game store's library:
   click **Activity** for the full log, which also opens by itself when something fails.
   Questions (like a save that changed in two places) come up as dialogs.
 - The icons on the left: library, **refresh**, **settings** (RetroArch's location, the ROM
-  folder, automatic core downloads and the touch pointer) and **log out**. On the first
+  folder, automatic core downloads, the touch pointer, and Ship of Harkinian: where it is,
+  or **Download** to have the launcher install it) and **log out**. On the first
   start the launcher finds RetroArch by itself.
 
 Covers are downloaded from RomM once and kept in `covers/`. The window needs Tkinter, which
@@ -88,7 +92,8 @@ terminal window on Windows, use `pythonw romm_launcher.py --gui`.
 | `romm_launcher.py --add game.gba` | Add game files you own to RomM (asks for the platform) |
 | `romm_launcher.py --no-launch zelda` | Download the ROM and save, but don't start RetroArch |
 | `romm_launcher.py --screen main mario` | DS/3DS: pick the screen layout without asking (`main`, `both` or `corner`) |
-| `romm_launcher.py --setup` | Change the RomM address, login or RetroArch paths |
+| `romm_launcher.py --with soh ocarina` | Ocarina of Time: play it in Ship of Harkinian (`soh`) or RetroArch (`retroarch`) without asking |
+| `romm_launcher.py --setup` | Change the RomM address, login, RetroArch paths or Ship of Harkinian |
 | `romm_launcher.py --paths` | Show where settings, ROMs and save backups are kept |
 
 **When you're done playing:** press F1 → **Close Content** (this makes RetroArch write the
@@ -210,6 +215,61 @@ platform's folder name in RomM and the core's name without `_libretro.dll`/`.so`
 The launcher follows RetroArch's own save settings from `retroarch.cfg`, including "Sort
 Saves into Folders by Core Name".
 
+## Ocarina of Time in Ship of Harkinian
+
+[Ship of Harkinian](https://www.shipofharkinian.com) (SoH) is Ocarina of Time rebuilt as
+a PC game from the decompiled original: widescreen, any resolution, 60 fps, HD texture
+packs and many options. It needs the game's ROM, which is where your RomM library comes in.
+SoH supports the N64 and GameCube releases (NTSC and PAL, and Master Quest); check yours at
+[ship.equipment](https://ship.equipment).
+
+1. Have Ocarina of Time in your RomM library as an `n64` (or `ngc`) game. If you only have
+   the ROM file: `romm_launcher.py --add "Ocarina of Time.z64"`.
+2. Play it. The launcher asks how:
+
+   ```
+     The Legend of Zelda: Ocarina of Time can be played two ways. Which one?
+         1  Ship of Harkinian: the PC version, with widescreen, high resolution and 60 fps
+         2  RetroArch (mupen64plus_next): the original game
+     Play with [1]:
+   ```
+
+   `--with soh` skips the question, and Enter keeps last time's choice.
+3. The first time, the launcher offers to **download SoH for you**:
+
+   ```
+     Ship of Harkinian isn't on this computer yet.
+         1  Download it for me: version 9.3.1, 69.6 MB, from its GitHub page
+         2  I have it already: tell the launcher where
+     Choice (q to skip) [1]:
+   ```
+
+   It takes the latest release from SoH's GitHub page (HarbourMasters/Shipwright): the
+   Windows zip or the Linux `.appimage`, checked against the SHA-256 checksum GitHub lists
+   for it, and installs it in `soh/windows/` or `soh/linux/` in the launcher's folder. In the
+   window, a dialog asks the same when you press Play (No lets you pick a `soh.exe` you
+   already have), and **Settings** has a Ship of Harkinian field with **Browse…** and
+   **Download** (clear the field to stop using it). `--setup` offers it too. Nothing already in that folder is ever replaced, so an installed SoH
+   isn't updated by the launcher: to get a newer version, delete `soh/<system>/soh.exe` (or
+   the `.appimage`; your saves in `Save/` stay) and play again.
+
+   If you'd rather install it yourself: on Windows, unzip it into a folder of its own (e.g.
+   `C:\Games\SoH`, not inside OneDrive); on Linux, take the `.appimage`. Then pick "I have
+   it already". The AppImage needs FUSE (`libfuse2` on Debian/Ubuntu).
+
+The first start of SoH turns the ROM into `oot.o2r` (`oot-mq.o2r` for Master Quest): the
+launcher hands it the ROM, SoH works for a minute and asks "Run SoH?" (answer Yes). After
+that, SoH starts straight away. **When you're done:** save in the game, then close SoH's
+window; the launcher uploads the save.
+
+SoH keeps its own saves (the three file slots in its `Save` folder: `file1.sav` …
+`file3.sav` and `global.sav`). The launcher syncs those with RomM as one zip, the same way
+as other saves (backed up before anything is replaced). They're separate from RetroArch's
+`.srm` save: the two can't read each other's, so progress doesn't carry over between them.
+SoH's data folder is the one it's in on Windows and for a SoH the launcher downloaded, and
+otherwise `~/.local/share/soh` on Linux (or SoH's folder, if its files are there already);
+set `"soh_data"` in this system's section of `config.json` to use another one.
+
 ## Using it on more than one computer
 
 Everything the launcher keeps is in its own folder, next to the script:
@@ -224,6 +284,7 @@ romm-launcher/
   backups/        replaced saves
   roms/           downloaded games (RomM has the real copies)
   covers/         cover art for the window
+  soh/            Ship of Harkinian, if the launcher downloaded it (with its settings and saves)
 ```
 
 You can copy the whole folder to another computer, including between Windows and Linux.
@@ -235,7 +296,8 @@ You can copy the whole folder to another computer, including between Windows and
   "username": "me",
   "roms_dir": "roms",
   "platforms": { "...": "..." },
-  "windows": { "retroarch": "C:\\RetroArch-Win64\\retroarch.exe", "cores_dir": "...", "saves_dir": "..." },
+  "windows": { "retroarch": "C:\\RetroArch-Win64\\retroarch.exe", "cores_dir": "...", "saves_dir": "...",
+               "soh": "C:\\Games\\SoH\\soh.exe" },
   "linux": { "retroarch": "flatpak:org.libretro.RetroArch", "cores_dir": "...", "saves_dir": "..." }
 }
 ```
@@ -255,7 +317,8 @@ Set the `ROMM_LAUNCHER_HOME` environment variable to keep the launcher's data in
 ## Known limits
 
 - **macOS** may work but hasn't been tested.
-- One save per game: save states and multiple save slots aren't synced.
+- One save per game: save states and multiple save slots aren't synced (Ship of
+  Harkinian's three file slots are synced together, as one save).
 - If you use Steam's RetroArch, turn off Steam Cloud for it so it doesn't fight RomM over
   the saves folder.
 
@@ -284,6 +347,7 @@ one file per topic:
 | `core_downloads.py` | Downloading missing cores from libretro |
 | `romm.py` | The RomM API, with its safety lock (reads, save uploads, new ROMs only) |
 | `saves.py` | Save files, 3DS save folders, backups, deciding which save is newer |
+| `ports.py` | PC ports that play a game instead of RetroArch: Ship of Harkinian |
 | `games.py` | A game from the library: ROM and save locations, search, covers, facts |
 | `launcher.py` | Logging in, the library, and playing a game (download, sync, run, upload) |
 | `gui.py` | The window (`--gui`) |
@@ -296,7 +360,8 @@ python3 tests/test_launcher.py
 ```
 
 The tests run the launcher against a fake RomM server in a temporary folder. On Windows,
-set `PYTHONIOENCODING=utf-8` first. Starting RetroArch isn't covered by the tests.
+set `PYTHONIOENCODING=utf-8` first. Starting RetroArch or Ship of Harkinian for real isn't
+covered by the tests.
 
 ## License
 

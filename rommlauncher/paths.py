@@ -38,6 +38,7 @@ STATE_FILE = APP_HOME / "state.json"
 LIBRARY_CACHE = APP_HOME / "library.json"
 BACKUP_DIR = APP_HOME / "backups"
 COVER_DIR = APP_HOME / "covers"  # cover art for the GUI, downloaded from RomM
+SOH_DIR = APP_HOME / "soh"  # Ship of Harkinian, when the launcher downloads it: soh/<system>/
 # Where older versions kept things; their contents are moved into APP_HOME on start.
 OLD_LOCATIONS = list(dict.fromkeys([
     Path.home() / ".config" / "romm-launcher",

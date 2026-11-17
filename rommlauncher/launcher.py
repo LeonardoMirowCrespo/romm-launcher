@@ -1,6 +1,7 @@
 """The launcher itself: login, the library, playing a game (download the ROM, sync the
-save, start RetroArch, upload the save), and setup. Used by both the terminal (cli)
-and the window (gui); it talks to the player only through `ui`.
+save, start RetroArch or a PC port like Ship of Harkinian, upload the save), and setup.
+Used by both the terminal (cli) and the window (gui); it talks to the player only
+through `ui`.
 """
 
 from __future__ import annotations
@@ -19,6 +20,24 @@ from .config import config_for_disk, load_config, roms_root
 from .core_downloads import CoreInstallError, core_info_dir, install_core, install_core_info
 from .dualscreen import SCREEN_CHOICES, SCREEN_LAYOUTS, TOUCH_CONTROLS
 from .games import Game, filter_games, guess_platform, index_roms, unpack_zip
+from .ports import (
+    PLAYERS,
+    RETROARCH,
+    SOH,
+    SOH_SITE,
+    SohInstallError,
+    config_path,
+    find_soh,
+    install_soh,
+    latest_soh_release,
+    player_choices,
+    soh_archive,
+    soh_data_dir,
+    soh_install_dir,
+    soh_installed,
+    soh_launch,
+    soh_save,
+)
 from .retroarch import (
     DEFAULT_RETROARCH,
     FLATPAK_RETROARCH,
@@ -57,7 +76,10 @@ from .ui import (
 from .util import fmt_time, load_json, save_json
 
 if TYPE_CHECKING:
+    from .ports import SohSave
     from .saves import FileSave, FolderSave
+
+    Save = FileSave | FolderSave | SohSave
 
 
 class Launcher:
@@ -123,6 +145,8 @@ class Launcher:
                 here.pop("roms_dir", None)
                 cfg["roms_dir"] = answer
         self.setup_retroarch()
+        print()
+        self.setup_soh()
 
     def setup_retroarch(self) -> None:
         """Ask for RetroArch's paths on this system and save them in its section."""
@@ -184,9 +208,80 @@ class Launcher:
                 return candidate
         return current
 
+    def setup_soh(self) -> bool:
+        """Set up Ship of Harkinian (optional: q / Enter skips): download it, or ask where it
+        is. Returns whether it's set."""
+        cfg = self.config
+        say(dim(f"Ship of Harkinian plays Ocarina of Time (N64/GameCube) as a PC game ({SOH_SITE})."))
+        found = find_soh(cfg)
+        if not found:
+            release = self.soh_release()
+            if release:
+                size = f", {human_size(release['size'])}" if release.get("size") else ""
+                answer = choose(
+                    "Ship of Harkinian isn't on this computer yet.",
+                    [("1", f"Download it for me: version {release['version']}{size}, from its GitHub page"),
+                     ("2", "I have it already: tell the launcher where")],
+                    "Choice (q to skip)", default="1", cancel=True,
+                    note=f"It's installed in {soh_install_dir()}, with its settings and saves.",
+                )
+                if answer is None:
+                    return False
+                if answer == "1":
+                    return self.download_soh(release)
+        say(dim("(Windows: unzip it to a folder of its own, e.g. C:\\Games\\SoH; Linux: the .appimage)."))
+        program = "soh.exe" if IS_WINDOWS else ".appimage"
+        while True:
+            answer = ask(f"Ship of Harkinian program ({program}; Enter to skip)", found).strip().strip('"')
+            if not answer:
+                return False
+            path = Path(answer).expanduser()
+            if not path.is_absolute():
+                path = paths.APP_HOME / path
+            if path.is_dir() and (path / "soh.exe").is_file():
+                path = path / "soh.exe"
+            if path.is_file():
+                break
+            warn(f"Not found: {path}")
+        self.use_soh(path)
+        return True
+
+    def use_soh(self, program: Path) -> None:
+        cfg = self.config
+        cfg.setdefault(system.OS_KEY, {})
+        cfg["soh"] = config_path(program)
+        self.save_config()
+        ok(f"Ship of Harkinian: {program}  (its saves: {soh_data_dir(cfg) / 'Save'})")
+
+    def soh_release(self) -> dict | None:
+        """SoH's latest release for this computer from GitHub, or None (with a note why)."""
+        say(dim("Asking GitHub for Ship of Harkinian's latest version…"))
+        try:
+            return latest_soh_release()
+        except SohInstallError as exc:
+            warn(str(exc))
+            return None
+
+    def download_soh(self, release: dict | None = None) -> bool:
+        """Download and install Ship of Harkinian, and use it from now on."""
+        release = release or self.soh_release()
+        if not release:
+            return False
+        try:
+            program = install_soh(release, label=f"Downloading Ship of Harkinian {release['version']}")
+        except (SohInstallError, OSError) as exc:
+            fail(f"Couldn't install Ship of Harkinian: {exc}")
+            return False
+        checked = "checked against GitHub's checksum" if release.get("sha256") else "GitHub lists no checksum for it"
+        ok(f"Ship of Harkinian {release['version']} installed in {program.parent} ({checked}).")
+        self.use_soh(program)
+        return True
+
     def check_install(self) -> None:
         """Point out missing RetroArch pieces right away instead of at play time."""
         cfg = self.config
+        if cfg.get("soh") and not soh_installed(cfg):
+            warn(f"Ship of Harkinian not found at {cfg['soh']}")
         if not retroarch_installed(cfg["retroarch"]):
             if flatpak_id(cfg["retroarch"]):
                 warn(f"The Flatpak {flatpak_id(cfg['retroarch'])} isn't installed "
@@ -398,20 +493,26 @@ class Launcher:
             say(dim("Steam may remove cores it didn't install when it checks its files."))
         return path
 
-    def mark_synced(self, game: Game, save_hash: str | None, pending: bool = False) -> None:
+    @staticmethod
+    def hash_key(save: "Save | None") -> str:
+        """Where state.json keeps the last synced hash: "hash" for RetroArch's saves,
+        "hash_<emulator>" for a PC port's (they're separate saves in RomM)."""
+        return f"hash_{save.emulator}" if save is not None and save.emulator else "hash"
+
+    def mark_synced(self, game: Game, save_hash: str | None, pending: bool = False, save: "Save | None" = None) -> None:
         entry = self.state.setdefault(str(game.id), {})
-        entry.update({"hash": save_hash, "synced_at": datetime.now().strftime("%Y-%m-%d %H:%M")})
+        entry.update({self.hash_key(save): save_hash, "synced_at": datetime.now().strftime("%Y-%m-%d %H:%M")})
         entry["pending_upload"] = pending
         save_json(paths.STATE_FILE, self.state)
 
-    def sync_before_play(self, game: Game, save: FileSave | FolderSave) -> str | None:
+    def sync_before_play(self, game: Game, save: "Save") -> str | None:
         """Bring RomM's newest save to this computer if it's newer.
 
         Returns the hash of the save RomM has (None if it has none), or raises Quit."""
         say("Checking RomM for your latest save…")
         remote = fetch_remote(self.client, game, save)
         local_hash = save.hash()
-        last = self.state.get(str(game.id), {}).get("hash")
+        last = self.state.get(str(game.id), {}).get(self.hash_key(save))
         action = decide(local_hash, remote.hash, last)
 
         if action == "conflict":
@@ -432,7 +533,7 @@ class Launcher:
             if local_hash is not None:
                 backup_bytes(save.read(), game.id, "replaced-by-romm", save.suffix)
             save.write(remote.data or b"")
-            self.mark_synced(game, remote.hash)
+            self.mark_synced(game, remote.hash, save=save)
             ok(f"Save from RomM ({fmt_time(remote.updated)}) → {save.location}")
         elif action == "keep" and remote.hash is None:
             ok("RomM has no save for this game yet; using the one on this computer.")
@@ -443,7 +544,7 @@ class Launcher:
             ok("RomM has no save for this game yet (and neither does this computer).")
             say(dim("Starting fresh; the save the game makes is uploaded to RomM when you close it."))
         else:
-            self.mark_synced(game, remote.hash)
+            self.mark_synced(game, remote.hash, save=save)
             ok("Save is already up to date.")
         return remote.hash
 
@@ -488,19 +589,85 @@ class Launcher:
         if touch:
             say(dim(touch["help"]))
 
-    def play(self, game: Game, launch: bool = True, screen: str | None = None) -> None:
+    # ----- what plays a game: RetroArch, or a PC port (Ship of Harkinian) ------
+
+    def default_player(self, game: Game) -> str:
+        """What plays this game unless the player picks: the choice from last time, else
+        Ship of Harkinian when it's set up, else RetroArch."""
+        choices = player_choices(game)
+        last = self.state.get(str(game.id), {}).get("player")
+        if last in choices:
+            return last
+        return SOH if choices and soh_installed(self.config) else RETROARCH
+
+    def choose_player(self, game: Game, player: str | None = None, launch: bool = True) -> str:
+        """For games a PC port can play: RetroArch or the port? Asks (default: last time's)
+        unless `player` is given; without launching, last time's is used."""
+        choices = player_choices(game)
+        if not choices:
+            if player and player != RETROARCH:
+                warn(f"{PLAYERS.get(player, player)} can't play {game.name}; using RetroArch.")
+            return RETROARCH
+        last = self.default_player(game)
+        played = self.state.get(str(game.id), {}).get("player") == last
+        if player not in choices:
+            if player:
+                warn(f"\"{player}\" can't play this game.")
+            if not launch:
+                return last
+            labels = {
+                SOH: "Ship of Harkinian: the PC version, with widescreen, high resolution and 60 fps"
+                     + ("" if soh_installed(self.config) else "  (not set up yet)"),
+                RETROARCH: f"RetroArch ({game.core or 'its N64 core'}): the original game",
+            }
+            answer = choose(
+                f"{game.name} can be played two ways. Which one?",
+                [(str(n), labels[c] + ("  (last time)" if c == last and played else "")) for n, c in enumerate(choices, 1)],
+                "Play with", default=str(choices.index(last) + 1),
+                note="The two keep separate saves (they can't read each other's).",
+            )
+            player = choices[int(answer) - 1]
+        entry = self.state.setdefault(str(game.id), {})
+        entry["player"] = player
+        save_json(paths.STATE_FILE, self.state)
+        return player
+
+    def ensure_soh(self) -> bool:
+        if soh_installed(self.config):
+            return True
+        if self.config.get("soh"):
+            warn(f"Ship of Harkinian isn't at {self.config['soh']} any more.")
+        else:
+            say("Ship of Harkinian isn't set up on this computer yet.")
+        return self.setup_soh()
+
+    def save_for(self, game: Game, rom_file: Path, player: str | None = None) -> "Save | None":
+        """This game's save on this computer for what plays it (default: last time's)."""
+        if (player or self.default_player(game)) == SOH:
+            return soh_save(self.config, rom_file)
+        return game.save(rom_file)
+
+    def play(self, game: Game, launch: bool = True, screen: str | None = None, player: str | None = None) -> None:
         print()
         say(bold(f"▶ {game.name}") + dim(f"  ({game.platform_name})"))
         rom_file = self.ensure_rom(game)
         if not rom_file:
             return
-        core = self.ensure_core(game) if launch else None
-        if launch and not core:
-            return
-        save = game.save(rom_file)
+        player = self.choose_player(game, player, launch)
+        core = None
+        if player == SOH:
+            if launch and not self.ensure_soh():
+                return
+        elif launch:
+            core = self.ensure_core(game)
+            if not core:
+                return
+        save = self.save_for(game, rom_file, player)
         remote_hash: str | None = None
         synced = False
-        if not save:
+        if not save and player == SOH:
+            warn("Ship of Harkinian isn't set up on this computer, so its save isn't synced.")
+        elif not save:
             warn(f"This game's save can't be synced with RomM (unknown save location for {game.platform_name}).")
         elif self.client:
             remote_hash = self.sync_before_play(game, save)
@@ -510,26 +677,44 @@ class Launcher:
 
         if not launch:
             return
-        retroarch = self.config["retroarch"]
-        if not retroarch_installed(retroarch):
-            if flatpak_id(retroarch):
-                fail(f"The RetroArch Flatpak isn't installed: flatpak install flathub {flatpak_id(retroarch)}")
-            else:
-                fail(f"RetroArch not found at {retroarch}. Fix it with --setup.")
-            return
-        if core_id(core.name) in SCREEN_LAYOUTS:
-            self.apply_screen_layout(game, core, rom_file, screen)
+        env = None
+        if player == SOH:
+            name = PLAYERS[SOH]
+            try:
+                command, cwd, env = soh_launch(self.config, game, rom_file)
+            except OSError as exc:
+                fail(f"Could not prepare Ship of Harkinian's folder: {exc}")
+                return
+            if len(command) > 1:
+                say(f"Ship of Harkinian first turns the ROM into {soh_archive(game)} (only this once; it takes a minute),")
+                say("then asks \"Run SoH?\": answer Yes.")
+            done_hint = "save in the game (pause menu), then close its window"
+        else:
+            retroarch = self.config["retroarch"]
+            if not retroarch_installed(retroarch):
+                if flatpak_id(retroarch):
+                    fail(f"The RetroArch Flatpak isn't installed: flatpak install flathub {flatpak_id(retroarch)}")
+                else:
+                    fail(f"RetroArch not found at {retroarch}. Fix it with --setup.")
+                return
+            if core_id(core.name) in SCREEN_LAYOUTS:
+                self.apply_screen_layout(game, core, rom_file, screen)
+            name = "RetroArch"
+            command = retroarch_command(retroarch) + ["-L", str(core), str(rom_file)]
+            cwd = None if flatpak_id(retroarch) else Path(retroarch).expanduser().parent
+            done_hint = f"{bold('F1 → Close Content')}, then quit RetroArch"
         entry = self.state.setdefault(str(game.id), {})
         entry["last_played"] = datetime.now().isoformat(timespec="seconds")
         save_json(paths.STATE_FILE, self.state)
 
         hash_before = save.hash() if save else None
         print()
-        say(f"Starting RetroArch. When you're done: {bold('F1 → Close Content')}, then quit RetroArch.")
+        say(f"Starting {name}. When you're done: {done_hint}.")
         try:
             proc = subprocess.Popen(
-                retroarch_command(retroarch) + ["-L", str(core), str(rom_file)],
-                cwd=None if flatpak_id(retroarch) else str(Path(retroarch).expanduser().parent),
+                command,
+                cwd=str(cwd) if cwd else None,
+                env=env,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 # Ctrl+C in this terminal must not kill the game.
@@ -540,9 +725,9 @@ class Launcher:
                 ),
             )
         except OSError as exc:
-            fail(f"Could not start RetroArch: {exc}")
+            fail(f"Could not start {name}: {exc}")
             return
-        self.wait_for(proc)
+        self.wait_for(proc, name)
 
         if not save:
             return
@@ -557,43 +742,43 @@ class Launcher:
             say("The save didn't change while playing, but RomM doesn't have it yet.")
         self.upload(game, save)
 
-    def wait_for(self, proc: subprocess.Popen) -> None:
-        say(dim("Waiting for RetroArch to close…"))
+    def wait_for(self, proc: subprocess.Popen, name: str = "RetroArch") -> None:
+        say(dim(f"Waiting for {name} to close…"))
         while True:
             try:
                 proc.wait()
                 return
             except KeyboardInterrupt:
                 print()
-                warn("RetroArch is still running. The save is uploaded when it closes.")
+                warn(f"{name} is still running. The save is uploaded when it closes.")
                 if ask_yes("Stop waiting? (then upload later with --upload)", default=False):
                     raise Quit
                 say(dim("Still waiting…"))
 
-    def upload(self, game: Game, save: FileSave | FolderSave) -> bool:
+    def upload(self, game: Game, save: "Save") -> bool:
         local_hash = save.hash()
         data = save.read()
         if not self.client:
-            self.mark_pending(game)
+            self.mark_pending(game, save)
             warn("Offline: the save stays on this computer and uploads next time.")
             return False
         say(f"Uploading your save to RomM ({human_size(len(data))})…")
         try:
             self.backup_romm_copy(game, save, local_hash)
-            self.client.upload_save(game.id, save.upload_name, data, core_id(game.core or "unknown"))
+            self.client.upload_save(game.id, save.upload_name, data, save.emulator or core_id(game.core or "unknown"))
         except RommError as exc:
-            self.mark_pending(game)
+            self.mark_pending(game, save)
             print()
             fail(red(bold("YOUR SAVE WAS NOT UPLOADED TO RomM.")))
             fail(str(exc))
             say(f"It is safe on this computer: {save.location}")
             say("The launcher will try again next time it starts.")
             return False
-        self.mark_synced(game, local_hash)
+        self.mark_synced(game, local_hash, save=save)
         ok("Save uploaded to RomM.")
         return True
 
-    def backup_romm_copy(self, game: Game, save: FileSave | FolderSave, new_hash: str | None) -> None:
+    def backup_romm_copy(self, game: Game, save: "Save", new_hash: str | None) -> None:
         """An upload replaces RomM's save of the same name, so keep a copy of that first.
         If the copy can't be made, raise, and nothing is uploaded."""
         try:
@@ -610,17 +795,19 @@ class Launcher:
         except (RommError, OSError) as exc:
             raise RommError(f"Couldn't back up the save RomM has now, so it wasn't replaced ({exc})") from exc
 
-    def mark_pending(self, game: Game) -> None:
+    def mark_pending(self, game: Game, save: "Save | None" = None) -> None:
         entry = self.state.setdefault(str(game.id), {})
         entry["pending_upload"] = True
         entry["pending_name"] = game.name
+        entry["pending_player"] = SOH if save is not None and save.emulator == SOH else RETROARCH
         save_json(paths.STATE_FILE, self.state)
 
     def retry_pending(self, games: list[Game]) -> None:
         pending = [g for g in games if self.state.get(str(g.id), {}).get("pending_upload")]
         for game in pending:
             rom_file = game.find_local_rom()
-            save = game.save(rom_file) if rom_file else None
+            player = self.state[str(game.id)].get("pending_player")
+            save = self.save_for(game, rom_file, player) if rom_file else None
             if not save or save.hash() is None:
                 continue
             warn(f"The last save of {game.name} never reached RomM. Uploading it now.")
@@ -631,7 +818,7 @@ class Launcher:
         if not rom_file:
             fail(f"{game.name} isn't on this computer, so there's no save to upload.")
             return
-        save = game.save(rom_file)
+        save = self.save_for(game, rom_file)
         if not save:
             fail(f"Saves for {game.name} can't be synced with RomM.")
             return

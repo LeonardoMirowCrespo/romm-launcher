@@ -13,7 +13,8 @@ go in `CLAUDE.local.md`, which is git-ignored. Nothing personal (server addresse
 usernames) belongs in the committed files.
 
 Usage: `romm_launcher.py` (pick from library), `romm_launcher.py zelda` (straight to a match),
-`--list`, `--upload <game>`, `--add <file>...` (add game files to RomM), `--no-launch`, `--screen main|both|corner`, `--gui`, `--setup`, `--paths` (alias `--backups`).
+`--list`, `--upload <game>`, `--add <file>...` (add game files to RomM), `--no-launch`, `--screen main|both|corner`,
+`--with soh|retroarch`, `--gui`, `--setup`, `--paths` (alias `--backups`).
 First run asks for setup.
 
 Flow when a game is picked:
@@ -22,7 +23,8 @@ Flow when a game is picked:
    folder is a cache the launcher manages; RomM holds the real copies.
 2. Fetch the newest save for the game from RomM, decide whether it's newer than the local one,
    and put it into RetroArch's saves folder (backing up whatever it replaces).
-3. Launch RetroArch with the platform's core and the ROM, and wait for the process to exit.
+3. Launch RetroArch with the platform's core and the ROM (or Ship of Harkinian, see
+   below), and wait for the process to exit.
 4. If the local save changed, upload it to RomM. A failed upload is marked `pending_upload`
    in state and retried at the next start.
 
@@ -59,7 +61,7 @@ downwards in this list (no import cycles; type-only imports use `TYPE_CHECKING`)
 | Module | Contents |
 | --- | --- |
 | `system.py` | `APP_NAME`, `IS_WINDOWS`, `OS_KEY`/`OS_KEYS`/`OS_NAMES`, `CORE_EXT(S)`, optional `keyring` (`HAVE_KEYRING`) |
-| `paths.py` | `APP_HOME` and the data files (`CONFIG_FILE`, `STATE_FILE`, `LIBRARY_CACHE`, `BACKUP_DIR`, `COVER_DIR`), `OLD_LOCATIONS` |
+| `paths.py` | `APP_HOME` and the data files (`CONFIG_FILE`, `STATE_FILE`, `LIBRARY_CACHE`, `BACKUP_DIR`, `COVER_DIR`, `SOH_DIR`), `OLD_LOCATIONS` |
 | `ui.py` | `TerminalUI`, `set_ui`, `say/ok/warn/fail`, `ask`, `ask_yes`, `choose`, `progress_bar`, `Progress`, `Quit`, colours, `human_size` |
 | `util.py` | `load_json`, `save_json`, `sha256`, `file_hash`, `parse_time`, `fmt_time`, `write_new_file` |
 | `retroarch.py` | Flatpak/Steam/default RetroArch, `read_retroarch_cfg`, `core_id`, `find_core`, `installed_cores`, `core_display_name`, `core_save_folder`, `KNOWN_CORE_FOLDERS`, core options (`retroarch_config_dir`, `core_options_file`, `set_core_options`) |
@@ -68,6 +70,7 @@ downwards in this list (no import cycles; type-only imports use `TYPE_CHECKING`)
 | `core_downloads.py` | buildbot: `install_core`, `install_core_info`, `core_download_url`, `http_download`, `CoreInstallError` |
 | `romm.py` | `RommClient` (+ safety lock `_check`, `ALLOWED_WRITES`; `upload_rom`, `start_scan`, `wait_for_task`, `list_platforms`), `RommError`, `LoginError` |
 | `saves.py` | `FileSave`, `FolderSave`, 3DS title ID helpers, `backup_bytes`/`backup_file`, `RemoteSave`, `fetch_remote`, `decide` |
+| `ports.py` | PC ports: Ship of Harkinian (`is_soh_game`, `player_choices`, `soh_data_dir`, `soh_launch`, `SohSave`, `find_soh`; download: `latest_soh_release`, `install_soh`, `SohInstallError`, `GITHUB_API`/`GITHUB`), `SOH`/`RETROARCH`/`PLAYERS` |
 | `games.py` | `Game`, `index_roms`, `unpack_zip`, `filter_games`, GUI library helpers (`library_filters`, `filter_library`, `local_game_ids`), `fetch_cover`, `ROM_PLATFORMS`/`guess_platform`, `game_facts` |
 | `launcher.py` | `Launcher` (setup, login, library, picker, `play`, `upload`, `retry_pending`, `add_rom`, ...) |
 | `gui.py` | `GuiUI`, `GuiProgress`, `GuiApp`, `run_gui` |
@@ -166,6 +169,44 @@ GameCube, Wii, Saturn, arcade/Neo Geo (fbneo). Core names checked against libret
 core-info repo and the buildbot (Windows and Linux); each core's save-folder name is in
 `KNOWN_CORE_FOLDERS` (its `.info` corename).
 
+**Ship of Harkinian** (`ports.py`, added 2026-11-17 at the user's request; checked against
+SoH 9.3's source). Ocarina of Time on `n64`/`ngc` (`is_soh_game`: name has "ocarina" and
+"time", not "3d") can be played in SoH or RetroArch: `Launcher.choose_player` asks (default
+`default_player`: state `player`, else SoH if set up), `--with soh|retroarch` or the GUI's
+"Play with" chips skip it. Config `soh` (program) and optional `soh_data` are
+`MACHINE_KEYS`. SoH turns the ROM into `oot.o2r` (`oot-mq.o2r` for Master Quest) once;
+`soh_launch` passes the ROM on the command line only while that file is missing (with it,
+SoH would ask to re-extract). SoH's data folder is its cwd on Windows and `$SHIP_HOME`
+elsewhere (the AppImage defaults to `~/.local/share/soh`), so the launcher starts it in
+`soh_data_dir` and sets `SHIP_HOME`. Saves: `SohSave` (a `FolderSave`) syncs only the
+top-level `*.sav` in `<data>/Save` (JSON: `file1-3.sav`, `global.sav`) as
+`<ROM stem> (Ship of Harkinian).zip`, emulator `soh`; SoH's `fileN-<time>.bak` and `.temp`
+files are never touched. Save objects carry `emulator`/`exts` (None for RetroArch's), so
+`fetch_remote` looks only at `soh` zips for SoH and at `.srm` for RetroArch, and
+`state.json` keeps SoH's last synced hash as `hash_soh` (`Launcher.hash_key`) beside
+RetroArch's `hash`; `pending_player` says which save a pending upload was. No new RomM
+writes were needed.
+
+**Downloading SoH** (2026-11-17, at the user's request): `setup_soh` (from `ensure_soh`
+and `--setup`) offers "Download it for me" when `find_soh` finds nothing; the GUI asks with
+a Yes/No/Cancel dialog (`GuiApp.pick_soh`) and runs `Launcher.download_soh` before `play`
+on the worker thread. The GUI's settings page (`show_settings`) has a Ship of Harkinian
+field (`soh_entry`, Browse…, a Download button `soh_download` only while it isn't installed,
+status line `soh_status`); Download closes the settings and runs `GuiApp.download_soh`
+(worker thread, progress in the status bar); a cleared field removes `soh` from the config
+and this system's section. `latest_soh_release` reads GitHub's `releases/latest` for
+HarbourMasters/Shipwright and takes the `-Win64.zip` (Windows) or `.appimage` (Linux,
+x86_64 only; nothing for macOS/ARM); the file must come from
+`https://github.com/HarbourMasters/Shipwright/releases/download/` and match the asset's
+`digest` (sha256) when GitHub lists one. `install_soh` puts it in `soh/<OS_KEY>/`
+(`soh_install_dir`, inside APP_HOME so it travels with the folder): the zip is checked for
+unsafe paths, unpacked into `<os>.part`, and the folder holding `soh.exe` is moved in
+without replacing anything; the AppImage is written via `.part` and made executable. An
+installed SoH is never replaced (no updates). Config `soh` is then relative
+(`soh/windows/soh.exe`, `config_path`; `soh_program` resolves it against APP_HOME), and
+its data folder is its own folder on Linux too. No RomM login is sent (it uses
+`core_downloads.http_download`).
+
 **Two-screen games.** If the core is in `SCREEN_LAYOUTS` (melondsds, melonds, desmume,
 citra; option names/values checked against each core's source), `Launcher.apply_screen_layout`
 asks before launch: 1 = main screen only, 2 = both, 3 = main + small touch screen in the
@@ -223,6 +264,7 @@ romm-launcher/
   backups/<rom_id>/  last 20 replaced saves (3DS saves as .zip)
   roms/<platform>/   downloaded ROMs (cache; RomM has the real copies)
   covers/          cover art for the GUI, <rom id>.png (cache)
+  soh/<system>/    Ship of Harkinian when the launcher downloaded it (+ its settings, .o2r, Save/)
 ```
 
 `roms_dir` in config is relative to `APP_HOME` (default `"roms"`; resolve it with
