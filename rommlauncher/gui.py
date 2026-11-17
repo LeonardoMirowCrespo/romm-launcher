@@ -975,7 +975,7 @@ class GuiApp:
         self._player_chips(players)
 
     def filetypes(self, port: Port) -> list[tuple[str, str]]:
-        return [(port.name, port.exe if IS_WINDOWS else "*.appimage *.AppImage"), ("All files", "*.*")]
+        return [(port.name, port.exe if IS_WINDOWS else port.linux_patterns()), ("All files", "*.*")]
 
     def pick_port(self, port: Port) -> str | None:
         """A PC port isn't set up (asked on Tk's thread, before playing): "download" to have
@@ -983,7 +983,7 @@ class GuiApp:
         answer = messagebox.askyesnocancel(
             APP_NAME, f"{port.name} isn't set up on this computer yet.\n\n"
             "Yes: download it for you, from its GitHub page, into the launcher's folder.\n"
-            f"No: pick the {port.exe if IS_WINDOWS else '.appimage'} you already have.", parent=self.root)
+            f"No: pick the {port.exe if IS_WINDOWS else port.linux_label} you already have.", parent=self.root)
         if answer is None:
             return None
         if answer:

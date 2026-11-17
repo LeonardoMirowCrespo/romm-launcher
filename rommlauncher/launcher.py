@@ -27,6 +27,7 @@ from .ports import (
     RETROARCH,
     Port,
     PortInstallError,
+    RomMismatch,
     config_path,
     player_choices,
     port_for,
@@ -206,7 +207,7 @@ class Launcher:
         """Set up a PC port (optional: q / Enter skips): download it, or ask where it is.
         Returns whether it's set."""
         cfg = self.config
-        say(dim(f"{port.name} plays {port.game} (N64/GameCube) as a PC game ({port.site})."))
+        say(dim(f"{port.name} plays {port.game} as a PC game ({port.site})."))
         found = port.find(cfg)
         if not found:
             release = self.port_release(port)
@@ -224,8 +225,8 @@ class Launcher:
                 if answer == "1":
                     return self.download_port(port, release)
         example = "C:\\Games\\" + port.exe.rsplit(".", 1)[0].upper()
-        say(dim(f"(Windows: unzip it to a folder of its own, e.g. {example}; Linux: the .appimage)."))
-        program = port.exe if IS_WINDOWS else ".appimage"
+        say(dim(f"(Windows: unzip it to a folder of its own, e.g. {example}; Linux: the {port.linux_label})."))
+        program = port.exe if IS_WINDOWS else port.linux_label
         while True:
             answer = ask(f"{port.name} program ({program}; Enter to skip)", found).strip().strip('"')
             if not answer:
@@ -679,17 +680,27 @@ class Launcher:
         env = None
         if port:
             name = port.name
+            first = port.needs_archive(self.config, game)
             try:
-                command, cwd, env = port.launch(self.config, game, rom_file)
+                try:
+                    command, cwd, env = port.launch(self.config, game, rom_file)
+                except RomMismatch:
+                    warn(f"{name} only takes the US release of {port.game}, unmodified "
+                         f"(MD5 {port.rom_md5}), and {rom_file.name} isn't it.")
+                    say(dim("It asks for the ROM itself: drop the right one onto its window."))
+                    first = False
+                    command, cwd, env = port.launch(self.config, game, None)
             except (OSError, zipfile.BadZipFile) as exc:
                 fail(f"Could not prepare {name}'s folder: {exc}")
                 return
-            if len(command) > 1:
+            if first and port.rom_md5:
+                say(f"{name} gets the ROM as {port.archive} in its folder (only this once).")
+            elif first:
                 end = "," if port.first_run else "."
                 say(f"{name} first turns the ROM into {port.archive_for(game)} (only this once; it takes a minute){end}")
                 if port.first_run:
                     say(port.first_run)
-            done_hint = "save in the game (pause menu), then close its window"
+            done_hint = port.done_hint
         else:
             retroarch = self.config["retroarch"]
             if not retroarch_installed(retroarch):

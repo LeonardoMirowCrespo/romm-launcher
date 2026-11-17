@@ -1,11 +1,13 @@
 """PC ports: games rebuilt for the PC that play your ROM's game instead of RetroArch.
-Two, both by HarbourMasters and built on the same framework (libultraship), so one
-`Port` description covers both:
+Each is one `Port` description:
 
 - Ship of Harkinian (SoH): Ocarina of Time (checked against its source, release 9.3).
 - 2 Ship 2 Harkinian (2S2H): Majora's Mask (checked against its source, release 5.0.1).
+- sm64coopdx: Super Mario 64 with online co-op (release 1.5.1). It works a little
+  differently; see COOP_DX below (`savepath_arg`, `rom_md5`).
 
-Both have widescreen, any resolution, 60 fps and HD texture packs. How they work:
+SoH and 2S2H are both by HarbourMasters, built on the same framework (libultraship), with
+widescreen, any resolution, 60 fps and HD texture packs. How they work:
 - They don't run the ROM. Once, they turn it into an archive in their data folder
   (SoH: `oot.o2r`, or `oot-mq.o2r` for Master Quest; 2S2H: `mm.o2r`) and after that only
   need that file. A ROM path on the command line is turned into the archive without a
@@ -29,6 +31,8 @@ against the SHA-256 GitHub lists for it, into `<port>/<system>/` in the launcher
 
 from __future__ import annotations
 
+import fnmatch
+import hashlib
 import io
 import json
 import os
@@ -52,6 +56,7 @@ if TYPE_CHECKING:
 
 SOH = "soh"
 TWOSHIP = "2ship"
+SM64COOPDX = "sm64coopdx"
 RETROARCH = "retroarch"
 
 # Where the ports are downloaded from: their releases on GitHub (tests point these elsewhere).
@@ -62,6 +67,11 @@ ROM_FOLDER = ".romm-launcher-rom"  # in the data folder: a zipped ROM unpacked f
 
 class PortInstallError(Exception):
     pass
+
+
+class RomMismatch(Exception):
+    """The game's ROM isn't the one release the port takes (it's left out; the port then
+    asks for one itself)."""
 
 
 def _words(game: "Game") -> set[str]:
@@ -86,21 +96,39 @@ class Port:
     site: str
     repo: str  # on GitHub
     exe: str  # the Windows program
-    appimage: str  # glob for the Linux AppImage
-    downloads: tuple[tuple[str, str], ...]  # (OS_KEY, end of the release file's name)
-    archive: str  # what it makes from the ROM
+    linux_exe: str  # the Linux program's file name (a glob, lower case)
+    linux_find: tuple[str, ...]  # globs for it in the usual folders
+    downloads: tuple[tuple[str, str], ...]  # (OS_KEY, end of the release file's name, lower case)
+    archive: str  # what it makes from the ROM (or, with rom_md5, the name the ROM is given)
     settings: str  # its settings file (shows a folder is its data folder)
-    save_folder: str
+    save_folder: str  # in its data folder ("" = the data folder itself)
     save_files: str  # regex for the save files that are synced
     linux_data: str  # its data folder in ~/.local/share
     mq_archive: str = ""  # Master Quest's archive (SoH)
     first_run: str = ""  # what it asks on the first start, if anything
     platforms: tuple[str, ...] = ("n64", "ngc")  # it takes the N64 and GameCube releases
     tip: str = "the PC version, with widescreen, high resolution and 60 fps"
+    done_hint: str = "save in the game (pause menu), then close its window"
+    # sm64coopdx's way instead of libultraship's: the data folder is given with this option
+    # (default: the per-user folder, %APPDATA% / ~/.local/share), and the ROM isn't passed
+    # but put in that folder as `archive`, only if it's the ROM with this MD5.
+    savepath_arg: str = ""
+    rom_md5: str = ""
 
     @property
     def data_key(self) -> str:
         return f"{self.key}_data"
+
+    @property
+    def linux_label(self) -> str:
+        """How to call the Linux program in messages: ".appimage" or its name."""
+        return ".appimage" if self.linux_exe.endswith(".appimage") else self.linux_exe
+
+    def linux_patterns(self) -> str:
+        """The Linux program for a file dialog (its globs are case-sensitive)."""
+        if self.linux_exe.endswith(".appimage"):
+            return f"{self.linux_exe} {self.linux_exe[:-9]}.AppImage"
+        return self.linux_exe
 
     def plays(self, game: "Game") -> bool:
         """The game this port is (N64/GameCube release, not the 3DS remake)."""
@@ -123,26 +151,37 @@ class Port:
         return bool(program and program.is_file())
 
     def data_dir(self, config: dict) -> Path | None:
-        """Its data folder (settings, archives, saves): config "<key>_data" if set; else on
-        Windows the program's folder, elsewhere the program's folder if its files are there
-        already (or the launcher installed it), else ~/.local/share/<name> (the AppImage's)."""
+        """Its data folder (settings, archives, saves): config "<key>_data" if set; the
+        program's folder when the launcher installed it. Otherwise for a port told its
+        folder with `savepath_arg`, its own per-user folder (%APPDATA%\\<name> or
+        ~/.local/share/<name>); for the others, on Windows the program's folder, elsewhere
+        the program's folder if its files are there already, else ~/.local/share/<name>
+        (the AppImage's)."""
         if config.get(self.data_key):
             return Path(config[self.data_key]).expanduser()
         program = self.program(config)
         if not program:
             return None
-        if system.IS_WINDOWS or program.parent == self.install_dir():
+        if program.parent == self.install_dir():
             return program.parent
-        markers = (self.settings, self.archive, self.mq_archive)
-        if any(f and (program.parent / f).exists() for f in markers):
+        if self.savepath_arg:
+            if system.IS_WINDOWS:
+                appdata = os.environ.get("APPDATA", "")
+                base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+                return base / self.linux_data
+        elif system.IS_WINDOWS:
             return program.parent
+        else:
+            markers = (self.settings, self.archive, self.mq_archive)
+            if any(f and (program.parent / f).exists() for f in markers):
+                return program.parent
         xdg = os.environ.get("XDG_DATA_HOME", "")
         base = Path(xdg) if xdg and Path(xdg).is_absolute() else Path.home() / ".local" / "share"
         return base / self.linux_data
 
     def saves_dir(self, config: dict) -> Path | None:
         data = self.data_dir(config)
-        return data / self.save_folder if data else None
+        return (data / self.save_folder if self.save_folder else data) if data else None
 
     def needs_archive(self, config: dict, game: "Game") -> bool:
         """True when the port hasn't made its archive from this game's ROM yet."""
@@ -150,19 +189,26 @@ class Port:
         name = self.archive_for(game)
         return not any(folder and (folder / name).exists() for folder in (data, program and program.parent))
 
-    def launch(self, config: dict, game: "Game", rom_file: Path) -> tuple[list[str], Path, dict]:
-        """(command, folder to start in, environment) to start the port. The ROM is passed
-        only while its archive doesn't exist (unzipped first if it's a zip; `cleanup`
-        removes that copy after the game closes)."""
+    def launch(self, config: dict, game: "Game", rom_file: Path | None) -> tuple[list[str], Path, dict]:
+        """(command, folder to start in, environment) to start the port. While its archive
+        doesn't exist, the ROM is passed (unzipped first if it's a zip; `cleanup` removes
+        that copy after the game closes), or with `rom_md5` put into the data folder
+        (`place_rom`; raises RomMismatch if it's not the ROM the port takes). Without
+        `rom_file`, the port is started without one."""
         program, data = self.program(config), self.data_dir(config)
         data.mkdir(parents=True, exist_ok=True)
         command = [str(program)]
-        if self.needs_archive(config, game):
-            command.append(str(unpacked_rom(rom_file, data / ROM_FOLDER)))
+        if self.savepath_arg:
+            command += [self.savepath_arg, str(data)]
+        if rom_file and self.needs_archive(config, game):
+            if self.rom_md5:
+                place_rom(rom_file, data / self.archive, self.rom_md5)
+            else:
+                command.append(str(unpacked_rom(rom_file, data / ROM_FOLDER)))
         env = dict(os.environ)
-        if not system.IS_WINDOWS:
+        if not system.IS_WINDOWS and not self.savepath_arg:
             env["SHIP_HOME"] = str(data)
-        return command, data, env
+        return command, (program.parent if self.savepath_arg else data), env
 
     def cleanup(self, config: dict) -> None:
         """Remove a ROM unpacked for the first start (the port has its archive by now)."""
@@ -194,7 +240,7 @@ class Port:
             candidates = [f / self.exe for f in folders]
         else:
             candidates = [p for d in (home / "Applications", home / "Games", home / "Downloads", home / ".local" / "bin")
-                          for p in sorted(d.glob(self.appimage))]
+                          for pattern in self.linux_find for p in sorted(d.glob(pattern))]
         which = shutil.which(self.exe.rsplit(".", 1)[0])
         if which:
             candidates.append(Path(which))
@@ -241,7 +287,10 @@ class Port:
             return None
         if system.OS_KEY == "windows":
             return folder / self.exe if (folder / self.exe).is_file() else None
-        return next((p for p in sorted(folder.iterdir()) if p.is_file() and p.name.lower().endswith(".appimage")), None)
+        return next((p for p in sorted(folder.iterdir()) if p.is_file() and self.is_linux_program(p.name)), None)
+
+    def is_linux_program(self, name: str) -> bool:
+        return fnmatch.fnmatchcase(name.lower(), self.linux_exe)
 
     def install(self, release: dict, label: str | None = None) -> Path:
         """Download it into install_dir() and return its program. Checked against GitHub's
@@ -276,10 +325,10 @@ class Port:
             if windows:
                 found = [p for p in tmp.rglob("*") if p.name.lower() == self.exe]
             else:
-                found = [p for p in tmp.rglob("*") if p.is_file() and p.name.lower().endswith(".appimage")]
+                found = [p for p in tmp.rglob("*") if p.is_file() and self.is_linux_program(p.name)]
             program = min(found, key=lambda p: len(p.parts), default=None)
             if not program:
-                raise PortInstallError(f"{release['file']} doesn't contain {self.exe if windows else 'an AppImage'}.")
+                raise PortInstallError(f"{release['file']} doesn't contain {self.exe if windows else self.linux_label}.")
             dest.mkdir(parents=True, exist_ok=True)
             for item in program.parent.iterdir():
                 if not (dest / item.name).exists():
@@ -297,7 +346,7 @@ class Port:
 SHIP_OF_HARKINIAN = Port(
     key=SOH, name="Ship of Harkinian", game="Ocarina of Time", words=("ocarina", "time"),
     site="https://www.shipofharkinian.com", repo="HarbourMasters/Shipwright",
-    exe="soh.exe", appimage="[Ss]o[Hh]*.[Aa]pp[Ii]mage",
+    exe="soh.exe", linux_exe="*.appimage", linux_find=("[Ss]o[Hh]*.[Aa]pp[Ii]mage",),
     downloads=(("windows", "-win64.zip"), ("linux", ".appimage")),
     archive="oot.o2r", mq_archive="oot-mq.o2r", settings="shipofharkinian.json",
     save_folder="Save", save_files=r"[^/]+\.sav", linux_data="soh",
@@ -306,12 +355,28 @@ SHIP_OF_HARKINIAN = Port(
 TWO_SHIP = Port(
     key=TWOSHIP, name="2 Ship 2 Harkinian", game="Majora's Mask", words=("majora", "mask"),
     site="https://github.com/2ship2harkinian/2ship2harkinian", repo="2ship2harkinian/2ship2harkinian",
-    exe="2ship.exe", appimage="2[Ss]hip*.[Aa]pp[Ii]mage",
+    exe="2ship.exe", linux_exe="*.appimage", linux_find=("2[Ss]hip*.[Aa]pp[Ii]mage",),
     downloads=(("windows", "-win64.zip"), ("linux", "-linux.zip")),
     archive="mm.o2r", settings="2ship2harkinian.json",
     save_folder="saves", save_files=r"file\d+(backup)?\.json", linux_data="2ship",
 )
-PORTS = {p.key: p for p in (SHIP_OF_HARKINIAN, TWO_SHIP)}
+# sm64coopdx (checked against its source, release 1.5.1): Super Mario 64 with online co-op.
+# It takes no ROM on the command line: at start it looks in its data folder (and its own
+# folder) for the US ROM, by MD5, and keeps it there as baserom.us.z64. Its data folder is
+# %APPDATA%\sm64coopdx / ~/.local/share/sm64coopdx unless --savepath says otherwise; the
+# save is that folder's sm64_save_file.bin (the 512-byte EEPROM, all four files).
+COOP_DX = Port(
+    key=SM64COOPDX, name="sm64coopdx", game="Super Mario 64", words=("super", "mario", "64"),
+    site="https://github.com/coop-deluxe/sm64coopdx", repo="coop-deluxe/sm64coopdx",
+    exe="sm64coopdx.exe", linux_exe="sm64coopdx", linux_find=("sm64coopdx", "sm64coopdx*/sm64coopdx"),
+    downloads=(("windows", "_windows.zip"), ("linux", "_linux.zip")),
+    archive="baserom.us.z64", settings="sm64config.txt",
+    save_folder="", save_files=r"sm64_save_file\.bin", linux_data="sm64coopdx",
+    platforms=("n64",), tip="the PC version, with online co-op, widescreen, 60 fps and mods",
+    done_hint="the game saves when you get a star (\"Save & Continue\"); then close its window",
+    savepath_arg="--savepath", rom_md5="20b854b239203baf6c961b850a4a51a2",
+)
+PORTS = {p.key: p for p in (SHIP_OF_HARKINIAN, TWO_SHIP, COOP_DX)}
 PLAYERS = {**{p.key: p.name for p in PORTS.values()}, RETROARCH: "RetroArch"}
 
 
@@ -347,6 +412,40 @@ def unpacked_rom(rom_file: Path, folder: Path) -> Path:
         with zf.open(info) as src, open(dest, "wb") as out:
             shutil.copyfileobj(src, out)
     return dest
+
+
+def rom_bytes(rom_file: Path) -> bytes:
+    """The ROM's contents: the file itself, or for a zip, its biggest file."""
+    if rom_file.suffix.lower() != ".zip":
+        return rom_file.read_bytes()
+    with zipfile.ZipFile(rom_file) as zf:
+        files = [i for i in zf.infolist() if not i.is_dir()]
+        if not files:
+            raise OSError(f"{rom_file.name} has no ROM in it")
+        return zf.read(max(files, key=lambda i: i.file_size))
+
+
+def big_endian_n64(data: bytes) -> bytes:
+    """An N64 ROM in the usual .z64 byte order (from .v64, byte-swapped, or .n64, little-endian)."""
+    head = data[:4]
+    if head == b"\x37\x80\x40\x12":  # .v64
+        out = bytearray(data)
+        out[0::2], out[1::2] = data[1::2], data[0::2]
+        return bytes(out)
+    if head == b"\x40\x12\x37\x80":  # .n64
+        out = bytearray(data)
+        out[0::4], out[1::4], out[2::4], out[3::4] = data[3::4], data[2::4], data[1::4], data[0::4]
+        return bytes(out)
+    return data
+
+
+def place_rom(rom_file: Path, dest: Path, md5: str) -> None:
+    """Put the ROM at `dest` (unzipped, in .z64 byte order) if it's the one with this MD5;
+    raise RomMismatch, writing nothing, if it isn't."""
+    data = big_endian_n64(rom_bytes(rom_file))
+    if hashlib.md5(data).hexdigest() != md5:
+        raise RomMismatch(rom_file.name)
+    write_new_file(dest, data)
 
 
 def config_path(program: Path) -> str:
