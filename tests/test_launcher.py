@@ -227,7 +227,7 @@ class H(BaseHTTPRequestHandler):
                                  "platform_fs_slug": slug, "platform_display_name": slug.upper()})
             return self.send(200, {"task_id": "scan-1", "status": "queued", "scan": body})
         q = parse_qs(u.query)
-        assert u.path == "/api/saves" and q["emulator"][0] in ("mupen64plus_next", "citra", "soh", "2ship"), self.path
+        assert u.path == "/api/saves" and q["emulator"][0] in ("mupen64plus_next", "citra", "soh", "2ship", "sm64coopdx"), self.path
         msg = BytesParser(policy=HTTP).parsebytes(
             b"Content-Type: " + self.headers["Content-Type"].encode() + b"\r\n\r\n" + raw
         )
@@ -438,7 +438,7 @@ class FakeRetroArch:
 real_popen, subprocess.Popen = subprocess.Popen, FakeRetroArch
 out = io.StringIO()
 with contextlib.redirect_stdout(out):
-    app.play(sm64)
+    app.play(sm64, player="retroarch")
 subprocess.Popen = real_popen
 log = out.getvalue()
 check("no RomM save is reported", "RomM has no save for this game yet" in log)
@@ -454,13 +454,13 @@ oot3d = games.Game({"id": 50, "name": "The Legend of Zelda: Ocarina of Time 3D",
 mq = games.Game({"id": 51, "name": "The Legend of Zelda: Ocarina of Time - Master Quest", "fs_name": "mq.iso",
                  "platform_fs_slug": "ngc"}, app.config)
 check("SoH offered for Ocarina of Time (N64/GC) only", ports.player_choices(oot) == ["soh", "retroarch"]
-      and ports.player_choices(mq) == ["soh", "retroarch"] and ports.player_choices(sm64) == []
+      and ports.player_choices(mq) == ["soh", "retroarch"] and ports.player_choices(sm64) == ["sm64coopdx", "retroarch"]
       and ports.player_choices(oot3d) == [])
 check("Master Quest has its own archive", ports.SHIP_OF_HARKINIAN.archive_for(mq) == "oot-mq.o2r" and ports.SHIP_OF_HARKINIAN.archive_for(oot) == "oot.o2r")
 check("SoH not set up: RetroArch stays the default", app.default_player(oot) == "retroarch"
       and "player" not in app.state.get("7", {}))
 with contextlib.redirect_stdout(io.StringIO()):
-    got = app.choose_player(sm64, "soh")
+    got = app.choose_player(sm64, "soh", launch=False)
 check("other games ignore --with soh", got == "retroarch")
 
 soh_dir = tmp / "SoH"
@@ -824,6 +824,134 @@ system.IS_WINDOWS = real_windows
 system.OS_KEY = real_os
 paths.APP_HOME = real_home
 del app.config["2ship"]
+
+# ---- sm64coopdx (Super Mario 64 with online co-op) --------------------------------
+import dataclasses
+import hashlib
+
+COOP = ports.COOP_DX
+coop_game = games.Game({"id": 60, "name": "Super Mario 64", "platform_fs_slug": "n64",
+                        "fs_name": "Super Mario 64 (coop test).zip"}, app.config)
+sm64ds = games.Game({"id": 61, "name": "Super Mario 64 DS", "fs_name": "sm64ds.nds",
+                     "platform_fs_slug": "nds"}, app.config)
+check("sm64coopdx offered for Super Mario 64 (N64) only", ports.port_for(coop_game) is COOP
+      and ports.player_choices(coop_game) == ["sm64coopdx", "retroarch"] and ports.player_choices(sm64ds) == [])
+
+# The real port only takes the real ROM (by MD5); the tests use one that takes this fake ROM.
+z64 = b"\x80\x37\x12\x40" + bytes(range(256)) * 64
+v64 = bytearray(z64)
+v64[0::2], v64[1::2] = z64[1::2], z64[0::2]
+coop_rom = coop_game.rom_dest
+coop_rom.write_bytes(make_zip({"Super Mario 64 (USA).v64": bytes(v64)}))
+TEST_COOP = dataclasses.replace(COOP, rom_md5=hashlib.md5(z64).hexdigest())
+ports.PORTS["sm64coopdx"] = TEST_COOP
+
+coop_dir = tmp / "coop"
+coop_dir.mkdir()
+coop_exe = coop_dir / "sm64coopdx.exe"
+coop_exe.write_bytes(b"")
+app.config["sm64coopdx"] = str(coop_exe)
+real_windows, real_appdata = system.IS_WINDOWS, os.environ.get("APPDATA")
+system.IS_WINDOWS = True
+os.environ["APPDATA"] = str(tmp / "appdata")
+check("sm64coopdx data folder on Windows: %APPDATA%\\sm64coopdx", COOP.data_dir(app.config) == tmp / "appdata" / "sm64coopdx")
+system.IS_WINDOWS = False
+os.environ["XDG_DATA_HOME"] = str(tmp / "xdg")
+check("sm64coopdx data folder on Linux: ~/.local/share/sm64coopdx", COOP.data_dir(app.config) == tmp / "xdg" / "sm64coopdx")
+del os.environ["XDG_DATA_HOME"]
+system.IS_WINDOWS = real_windows
+coop_data = tmp / "coop-data"
+app.config["sm64coopdx_data"] = str(coop_data)
+check("sm64coopdx data folder from config", COOP.data_dir(app.config) == coop_data
+      and COOP.saves_dir(app.config) == coop_data)
+if real_appdata is None:
+    del os.environ["APPDATA"]
+else:
+    os.environ["APPDATA"] = real_appdata
+
+
+class FakeCoop:
+    def __init__(self, args, **kw):
+        rom = coop_data / "baserom.us.z64"
+        launched.append((args, kw, rom.read_bytes() if rom.exists() else None))
+        (coop_data / "sm64_save_file.bin").write_bytes(b"\x01" * 512)
+        (coop_data / "sm64config.txt").write_text("coop settings")
+
+    def wait(self):
+        return 0
+
+
+launched.clear()
+subprocess.Popen = FakeCoop
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    app.play(coop_game, player="sm64coopdx")
+subprocess.Popen = real_popen
+args, kw, rom_seen = launched[0]
+check("sm64coopdx started with --savepath, from its own folder",
+      args == [str(coop_exe), "--savepath", str(coop_data)] and kw["cwd"] == str(coop_dir)
+      and kw["env"].get("SHIP_HOME") != str(coop_data))
+check("sm64coopdx given the ROM as baserom.us.z64, unzipped and in .z64 byte order",
+      rom_seen == z64 and "baserom.us.z64" in out.getvalue())
+newest = saves.fetch_remote(c, coop_game, app.save_for(coop_game, coop_rom, "sm64coopdx"))
+check("sm64coopdx save uploaded: only sm64_save_file.bin", "Save uploaded to RomM." in out.getvalue()
+      and STORE["saves"][-1]["emulator"] == "sm64coopdx"
+      and STORE["saves"][-1]["file_name"] == "Super Mario 64 (coop test) (sm64coopdx).zip"
+      and zipfile.ZipFile(io.BytesIO(newest.data)).namelist() == ["sm64_save_file.bin"]
+      and app.state["60"]["hash_sm64coopdx"] == app.save_for(coop_game, coop_rom, "sm64coopdx").hash())
+launched.clear()
+subprocess.Popen = FakeCoop
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    app.play(coop_game, player="sm64coopdx")
+subprocess.Popen = real_popen
+check("with baserom.us.z64 there, nothing is copied again", launched[0][0] == [str(coop_exe), "--savepath", str(coop_data)]
+      and "baserom" not in out.getvalue())
+
+# A ROM that isn't the US one: nothing is written, the game still starts and asks for one.
+(coop_data / "baserom.us.z64").unlink()
+ports.PORTS["sm64coopdx"] = COOP
+launched.clear()
+subprocess.Popen = FakeCoop
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    app.play(coop_game, player="sm64coopdx")
+subprocess.Popen = real_popen
+check("not the US ROM: warned, started without it, nothing written", launched and launched[0][2] is None
+      and "only takes the US release" in out.getvalue() and not (coop_data / "baserom.us.z64").exists())
+coop_rom.unlink()  # later tests expect only Ocarina of Time on this computer
+del app.config["sm64coopdx"], app.config["sm64coopdx_data"]
+
+# Downloading it: Windows and Linux zips (on Linux a plain program, not an AppImage).
+real_home, real_os = paths.APP_HOME, system.OS_KEY
+paths.APP_HOME = tmp
+GH["files"] = {"sm64coopdx_SteamOS.zip": make_zip({"sm64coopdx": b"steamos"}),
+               "sm64coopdx_Linux.zip": make_zip({"sm64coopdx": b"\x7fELF coop", "libdiscord_game_sdk.so": b"so",
+                                                 "lang/English.ini": b"[x]"}),
+               "sm64coopdx_Windows.zip": make_zip({"sm64coopdx.exe": b"MZ coop", "discord_game_sdk.dll": b"dll",
+                                                   "lang/English.ini": b"[x]", "coopdx_updater.exe": b"MZ"})}
+GH["release"] = {"tag_name": "v1.5.1", "name": "Super Mario 64 Coop Deluxe v1.5.1", "assets": [
+    {"name": name, "size": len(data), "digest": "sha256:" + util.sha256(data),
+     "browser_download_url": f"{base}coop-deluxe/sm64coopdx/releases/download/v1.5.1/{name}"}
+    for name, data in GH["files"].items()]}
+system.OS_KEY = "windows"
+win_program = COOP.install(COOP.latest_release())
+check("sm64coopdx downloaded (Windows zip)", win_program == tmp / "sm64coopdx" / "windows" / "sm64coopdx.exe"
+      and win_program.read_bytes() == b"MZ coop" and (win_program.parent / "lang" / "English.ini").is_file()
+      and GH["asked"] == "/repos/coop-deluxe/sm64coopdx/releases/latest")
+check("a downloaded sm64coopdx keeps its data beside it",
+      COOP.data_dir({"sm64coopdx": "sm64coopdx/windows/sm64coopdx.exe"}) == win_program.parent)
+system.OS_KEY = "linux"
+real_windows, system.IS_WINDOWS = system.IS_WINDOWS, False
+linux_program = COOP.install(COOP.latest_release())
+check("sm64coopdx downloaded (Linux: the program from the Linux zip, not SteamOS's)",
+      linux_program == tmp / "sm64coopdx" / "linux" / "sm64coopdx" and linux_program.read_bytes() == b"\x7fELF coop"
+      and (real_windows or os.access(linux_program, os.X_OK))
+      and COOP.installed_program(linux_program.parent) == linux_program
+      and COOP.data_dir({"sm64coopdx": "sm64coopdx/linux/sm64coopdx"}) == linux_program.parent)
+system.IS_WINDOWS = real_windows
+system.OS_KEY = real_os
+paths.APP_HOME = real_home
 
 # RomM that refuses Basic auth on writes (CSRF) -> switch to a token.
 FLAGS["csrf"] = True
@@ -1237,7 +1365,7 @@ sm64_save = sm64.save_path(sm64.rom_dest)
 launched.clear()
 subprocess.Popen = FakeRetroArch
 with contextlib.redirect_stdout(io.StringIO()):
-    app.play(sm64)
+    app.play(sm64, player="retroarch")
 subprocess.Popen = real_popen
 check("flatpak: game started through flatpak run", launched and launched[0][:4] == ["flatpak", "run", "org.libretro.RetroArch", "-L"]
       and launched[0][-1] == str(sm64.rom_dest))
@@ -1247,7 +1375,7 @@ retroarch._flatpak_locations.clear()
 launched.clear()
 out = io.StringIO()
 with contextlib.redirect_stdout(out):
-    app.play(sm64)
+    app.play(sm64, player="retroarch")
 check("flatpak not installed: clear message, nothing started", not launched and "flatpak install flathub" in out.getvalue())
 sm64.rom_dest.unlink()
 app.config.update(retroarch=saved_ra[0], cores_dir=saved_ra[1], saves_dir=saved_ra[2])

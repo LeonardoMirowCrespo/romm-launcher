@@ -12,9 +12,10 @@ on another.
 - Your saves are never thrown away: anything that gets replaced is backed up first.
 - Works offline with games you've already downloaded; saves upload the next time you're online.
 - Add games you own (your own cartridge dumps) to RomM from the launcher.
-- Plays Ocarina of Time in [Ship of Harkinian](https://www.shipofharkinian.com) and Majora's
-  Mask in [2 Ship 2 Harkinian](https://github.com/2ship2harkinian/2ship2harkinian), the PC
-  ports, if you like (widescreen, high resolution, 60 fps), with their saves in RomM too.
+- Plays Ocarina of Time in [Ship of Harkinian](https://www.shipofharkinian.com), Majora's
+  Mask in [2 Ship 2 Harkinian](https://github.com/2ship2harkinian/2ship2harkinian) and Super
+  Mario 64 in [sm64coopdx](https://github.com/coop-deluxe/sm64coopdx) (with online co-op),
+  the PC ports, if you like (widescreen, high resolution, 60 fps), with their saves in RomM too.
 
 ## What you need
 
@@ -60,7 +61,7 @@ Opens the launcher as a window, like a game store's library:
   the **installed** ones, or **one platform** (N64, DS, …).
 - Click a game for its details on the right: **Play** (or double-click the cover),
   **Download only**, **Upload save**, for DS/3DS games the **screens** (main, both, corner),
-  for Ocarina of Time and Majora's Mask **Play with** (the PC port or RetroArch),
+  for Ocarina of Time, Majora's Mask and Super Mario 64 **Play with** (the PC port or RetroArch),
   when you last played and synced, and what RomM knows about the game: release year, genre,
   rating, modes, series, region and its description. The game you played last is selected
   at the start.
@@ -95,6 +96,7 @@ terminal window on Windows, use `pythonw romm_launcher.py --gui`.
 | `romm_launcher.py --screen main mario` | DS/3DS: pick the screen layout without asking (`main`, `both` or `corner`) |
 | `romm_launcher.py --with soh ocarina` | Ocarina of Time: play it in Ship of Harkinian (`soh`) or RetroArch (`retroarch`) without asking |
 | `romm_launcher.py --with 2ship majora` | Majora's Mask: play it in 2 Ship 2 Harkinian (`2ship`) or RetroArch without asking |
+| `romm_launcher.py --with sm64coopdx mario 64` | Super Mario 64: play it in sm64coopdx (`sm64coopdx`) or RetroArch without asking |
 | `romm_launcher.py --setup` | Change the RomM address, login, RetroArch paths or the PC ports |
 | `romm_launcher.py --paths` | Show where settings, ROMs and save backups are kept |
 
@@ -298,6 +300,33 @@ it. The data folder works as for SoH: its own folder on Windows and for a 2S2H t
 downloaded, otherwise `~/.local/share/2ship` on Linux; `"2ship_data"` in `config.json`
 overrides it.
 
+## Super Mario 64 in sm64coopdx
+
+[sm64coopdx](https://github.com/coop-deluxe/sm64coopdx) (Super Mario 64 Coop Deluxe) is
+Super Mario 64 rebuilt for the PC from the decompiled game, with **online co-op** (host or
+join a game, or use its CoopNet server list), widescreen, 60 fps and Lua mods. It takes
+only the **US** N64 release, unmodified.
+
+Play Super Mario 64 and pick sm64coopdx (or `--with sm64coopdx`). The first time, the
+launcher offers to download it from its GitHub page into `sm64coopdx/windows/` or
+`sm64coopdx/linux/`, checked against GitHub's checksum, like the ports above; **Settings**
+in the window has a field for it too.
+
+sm64coopdx has no way to be handed a ROM, so the launcher puts the game's ROM into
+sm64coopdx's folder as `baserom.us.z64` (unzipped, and turned into `.z64` byte order if
+it's a `.v64` or `.n64`) before the first start. It only does that if the ROM is the US
+release sm64coopdx takes (it checks the same MD5); otherwise it says so and sm64coopdx asks
+you to drop the right ROM onto its window. **When you're done:** the game saves when you
+get a star (pick "Save & Continue"); close its window and the launcher uploads the save.
+
+The save is one file, `sm64_save_file.bin` (all four save files of the game), synced with
+RomM as a zip, separate from RetroArch's `.srm`. sm64coopdx keeps it in its data folder:
+its own folder for a copy the launcher downloaded; for one you installed yourself, the
+folder sm64coopdx normally uses, `%APPDATA%\sm64coopdx` on Windows or
+`~/.local/share/sm64coopdx` on Linux (so your existing save there is the one that's
+synced). The launcher starts it with `--savepath` pointing there; `"sm64coopdx_data"` in
+`config.json` picks another folder.
+
 ## Using it on more than one computer
 
 Everything the launcher keeps is in its own folder, next to the script:
@@ -314,6 +343,7 @@ romm-launcher/
   covers/         cover art for the window
   soh/            Ship of Harkinian, if the launcher downloaded it (with its settings and saves)
   2ship/          2 Ship 2 Harkinian, likewise
+  sm64coopdx/     sm64coopdx, likewise (with its baserom.us.z64)
 ```
 
 You can copy the whole folder to another computer, including between Windows and Linux.
@@ -376,7 +406,7 @@ one file per topic:
 | `core_downloads.py` | Downloading missing cores from libretro |
 | `romm.py` | The RomM API, with its safety lock (reads, save uploads, new ROMs only) |
 | `saves.py` | Save files, 3DS save folders, backups, deciding which save is newer |
-| `ports.py` | PC ports that play a game instead of RetroArch: Ship of Harkinian, 2 Ship 2 Harkinian |
+| `ports.py` | PC ports that play a game instead of RetroArch: Ship of Harkinian, 2 Ship 2 Harkinian, sm64coopdx |
 | `games.py` | A game from the library: ROM and save locations, search, covers, facts |
 | `launcher.py` | Logging in, the library, and playing a game (download, sync, run, upload) |
 | `gui.py` | The window (`--gui`) |

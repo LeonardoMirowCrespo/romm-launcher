@@ -36,8 +36,8 @@ def main(argv: list[str] | None = None) -> int:
                              "screens, or main screen + small touch screen in the bottom-right corner")
     parser.add_argument("--with", choices=(*PORTS, RETROARCH), dest="player",
                         help="for games a PC port plays, without asking: Ocarina of Time in Ship of "
-                             "Harkinian (soh), Majora's Mask in 2 Ship 2 Harkinian (2ship), or either "
-                             "in RetroArch")
+                             "Harkinian (soh), Majora's Mask in 2 Ship 2 Harkinian (2ship), Super Mario "
+                             "64 in sm64coopdx (sm64coopdx), or any of them in RetroArch")
     parser.add_argument("--add", nargs="+", metavar="FILE", type=Path,
                         help="add game files you own (your own cartridge dumps, homebrew) to RomM")
     parser.add_argument("--gui", action="store_true", help="open the launcher in a window instead of the terminal")

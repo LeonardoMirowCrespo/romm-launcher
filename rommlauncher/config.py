@@ -21,9 +21,10 @@ from .util import load_json, save_json
 # config.json is shared between computers: the RomM login, ROM folder and cores are the
 # same everywhere, but RetroArch's paths differ per system. Those live in a section per
 # system ("windows", "linux", "macos"), and the section for this system is used.
-# The PC ports' programs ("soh", "2ship") and data folders ("soh_data", "2ship_data") are
+# The PC ports' programs ("soh", "2ship", "sm64coopdx") and data folders ("<port>_data") are
 # per system too.
-MACHINE_KEYS = ("retroarch", "cores_dir", "saves_dir", "sort_saves_by_core", "soh", "soh_data", "2ship", "2ship_data")
+MACHINE_KEYS = ("retroarch", "cores_dir", "saves_dir", "sort_saves_by_core", "soh", "soh_data", "2ship", "2ship_data",
+                "sm64coopdx", "sm64coopdx_data")
 
 
 # RomM platform folder name -> RetroArch core and the save file extensions it writes.

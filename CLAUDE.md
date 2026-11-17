@@ -14,7 +14,7 @@ usernames) belongs in the committed files.
 
 Usage: `romm_launcher.py` (pick from library), `romm_launcher.py zelda` (straight to a match),
 `--list`, `--upload <game>`, `--add <file>...` (add game files to RomM), `--no-launch`, `--screen main|both|corner`,
-`--with soh|2ship|retroarch`, `--gui`, `--setup`, `--paths` (alias `--backups`).
+`--with soh|2ship|sm64coopdx|retroarch`, `--gui`, `--setup`, `--paths` (alias `--backups`).
 First run asks for setup.
 
 Flow when a game is picked:
@@ -70,7 +70,7 @@ downwards in this list (no import cycles; type-only imports use `TYPE_CHECKING`)
 | `core_downloads.py` | buildbot: `install_core`, `install_core_info`, `core_download_url`, `http_download`, `CoreInstallError` |
 | `romm.py` | `RommClient` (+ safety lock `_check`, `ALLOWED_WRITES`; `upload_rom`, `start_scan`, `wait_for_task`, `list_platforms`), `RommError`, `LoginError` |
 | `saves.py` | `FileSave`, `FolderSave`, 3DS title ID helpers, `backup_bytes`/`backup_file`, `RemoteSave`, `fetch_remote`, `decide` |
-| `ports.py` | PC ports: `Port` (`plays`, `archive_for`, `program`, `installed`, `data_dir`, `saves_dir`, `launch`, `cleanup`, `save`, `find`; download: `install_dir`, `latest_release`, `install`), `SHIP_OF_HARKINIAN`, `TWO_SHIP`, `PORTS`, `port_for`, `player_choices`, `PortSave`, `unpacked_rom`, `PortInstallError`, `GITHUB_API`/`GITHUB`, `SOH`/`TWOSHIP`/`RETROARCH`/`PLAYERS` |
+| `ports.py` | PC ports: `Port` (`plays`, `archive_for`, `program`, `installed`, `data_dir`, `saves_dir`, `launch`, `cleanup`, `save`, `find`; download: `install_dir`, `latest_release`, `install`), `SHIP_OF_HARKINIAN`, `TWO_SHIP`, `COOP_DX`, `PORTS`, `port_for`, `player_choices`, `PortSave`, `unpacked_rom`, `place_rom`/`big_endian_n64`/`RomMismatch`, `PortInstallError`, `GITHUB_API`/`GITHUB`, `SOH`/`TWOSHIP`/`SM64COOPDX`/`RETROARCH`/`PLAYERS` |
 | `games.py` | `Game`, `index_roms`, `unpack_zip`, `filter_games`, GUI library helpers (`library_filters`, `filter_library`, `local_game_ids`), `fetch_cover`, `ROM_PLATFORMS`/`guess_platform`, `game_facts` |
 | `launcher.py` | `Launcher` (setup, login, library, picker, `play`, `upload`, `retry_pending`, `add_rom`, ...) |
 | `gui.py` | `GuiUI`, `GuiProgress`, `GuiApp`, `run_gui` |
@@ -172,13 +172,15 @@ core-info repo and the buildbot (Windows and Linux); each core's save-folder nam
 **PC ports** (`ports.py`). Ship of Harkinian (SoH, Ocarina of Time; added 2026-11-17 at
 the user's request, checked against SoH 9.3's source) and 2 Ship 2 Harkinian (2S2H,
 Majora's Mask; added 2026-11-17 at the user's request, checked against 2S2H 5.0.1's source
-and libultraship). Both are HarbourMasters ports on libultraship and behave the same, so
-each is one `Port` value (`SHIP_OF_HARKINIAN`, `TWO_SHIP`, in `PORTS` by key). A port's
-`key` (`soh`, `2ship`) is everything: the `--with` choice, the config key of its program
+and libultraship), plus sm64coopdx (Super Mario 64, see its item below). SoH and 2S2H are
+HarbourMasters ports on libultraship and behave the same; each port is one `Port` value
+(`SHIP_OF_HARKINIAN`, `TWO_SHIP`, `COOP_DX`, in `PORTS` by key). A port's
+`key` (`soh`, `2ship`, `sm64coopdx`) is everything: the `--with` choice, the config key of its program
 (`<key>_data` for its data folder; both `MACHINE_KEYS`), RomM's `emulator` for its saves,
 `hash_<key>` in state and its download folder `<key>/<OS_KEY>/` in APP_HOME. A game is a
-port's when it's on `n64`/`ngc` and its name has the port's `words` ("ocarina"+"time",
-"majora"+"mask") and not "3d" (`Port.plays`, `port_for`); it can then be played in the
+port's when it's on one of its `platforms` (`n64`/`ngc`; sm64coopdx `n64` only) and its name
+has the port's `words` ("ocarina"+"time", "majora"+"mask", "super"+"mario"+"64") and not
+"3d" (`Port.plays`, `port_for`); it can then be played in the
 port or RetroArch: `Launcher.choose_player` asks (default `default_player`: state `player`,
 else the port if set up), `--with` or the GUI's "Play with" chips skip it.
 
@@ -220,6 +222,24 @@ else the port if set up), `--with` or the GUI's "Play with" chips skip it.
   relative (`soh/windows/soh.exe`, `config_path`; `Port.program` resolves it against
   APP_HOME), and its data folder is its own folder on Linux too. No RomM login is sent (it
   uses `core_downloads.http_download`).
+- **sm64coopdx** (`COOP_DX`, Super Mario 64 with online co-op; added 2026-11-17 at the
+  user's request, checked against sm64coopdx 1.5.1's source: `cliopts.c`,
+  `rom_checker.cpp`, `platform.c`, `fs/fs.h`). Not libultraship, so two `Port` fields
+  switch to its way. `savepath_arg="--savepath"`: the data folder is passed as
+  `--savepath <data>` (no `SHIP_HOME`; it's started in its program folder), and its default
+  is sm64coopdx's own per-user folder (`%APPDATA%\sm64coopdx`, `~/.local/share/sm64coopdx`)
+  unless the launcher installed it. `rom_md5`: it takes no ROM argument but scans its data
+  folder (and exe folder) for a `.z64` with the US MD5 `20b854b2…` and copies it to
+  `baserom.us.z64`, so `place_rom` writes the ROM there as `baserom.us.z64` (zip unpacked,
+  `.v64`/`.n64` byte order fixed by `big_endian_n64`) only if the MD5 matches; otherwise
+  `RomMismatch`, the launcher warns and starts it without a ROM (it then asks for one to be
+  dropped on its window). The user's RomM copy (`Super Mario 64 (USA).z64` in a zip)
+  matches. Save: `sm64_save_file.bin` (512-byte EEPROM) in the data folder itself
+  (`save_folder=""`), as `<ROM stem> (sm64coopdx).zip`, emulator `sm64coopdx`. Downloads:
+  `_windows.zip` (`sm64coopdx.exe`) / `_linux.zip` (a plain `sm64coopdx` program, not an
+  AppImage: `linux_exe`/`linux_find` say what the Linux program is called); there's also a
+  `_steamos.zip`, which isn't used. It ships its own `coopdx_updater`; the launcher never
+  updates it.
 
 **Two-screen games.** If the core is in `SCREEN_LAYOUTS` (melondsds, melonds, desmume,
 citra; option names/values checked against each core's source), `Launcher.apply_screen_layout`
@@ -280,6 +300,7 @@ romm-launcher/
   covers/          cover art for the GUI, <rom id>.png (cache)
   soh/<system>/    Ship of Harkinian when the launcher downloaded it (+ its settings, .o2r, Save/)
   2ship/<system>/  2 Ship 2 Harkinian likewise (+ mm.o2r, saves/)
+  sm64coopdx/<system>/  sm64coopdx likewise (+ baserom.us.z64, sm64_save_file.bin)
 ```
 
 `roms_dir` in config is relative to `APP_HOME` (default `"roms"`; resolve it with
