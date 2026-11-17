@@ -8,6 +8,7 @@ library.json
 backups/
 roms/
 covers/
+soh/
 
 # Machine-specific notes
 CLAUDE.local.md

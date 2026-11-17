@@ -233,7 +233,9 @@ class RommClient:
         rom = self._json("GET", f"/api/roms/{rom_id}")
         return rom.get("user_saves", []) if isinstance(rom, dict) else []
 
-    def newest_save(self, rom_id: int, extensions: list[str]) -> dict | None:
+    def newest_save(self, rom_id: int, extensions: list[str], emulator: str | None = None) -> dict | None:
+        """The newest save of a ROM with one of these extensions (and, if given, made by
+        this emulator; saves RomM lists without one count too)."""
         exts = {e.lower().lstrip(".") for e in extensions}
         saves = [
             s
@@ -243,6 +245,7 @@ class RommClient:
                 (s.get("file_extension") or "").lower().lstrip(".") in exts
                 or Path(s.get("file_name") or "").suffix.lower().lstrip(".") in exts
             )
+            and (not emulator or not s.get("emulator") or s["emulator"] == emulator)
         ]
         if not saves:
             return None
