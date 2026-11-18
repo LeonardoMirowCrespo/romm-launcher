@@ -173,7 +173,7 @@ class GuiProgress:
 
 
 class GuiApp:
-    """The window: a login screen, then the library (icon rail, filter chips and cover grid,
+    """The window: a first-start choice (RomM or not), a login screen, then the library (icon rail, filter chips and cover grid,
     game details on the right, a status bar that opens the activity log)."""
 
     def __init__(self):
@@ -275,7 +275,53 @@ class GuiApp:
                               bg=parent["bg"], activebackground=parent["bg"], activeforeground=THEME["text"],
                               selectcolor=THEME["entry"], bd=0, highlightthickness=0)
 
-    # ----- login ----------------------------------------------------------
+    # ----- first start, login ---------------------------------------------
+
+    def start(self) -> None:
+        """The first screen: on the very first start, RomM or not (show_welcome); without
+        RomM, the library straight away; else the login."""
+        if not paths.CONFIG_FILE.exists():
+            self.show_welcome()
+        elif not self.launcher.uses_romm:
+            self.after_login()
+        else:
+            self.show_login()
+
+    def show_welcome(self) -> None:
+        """First start: connect to a RomM server, or keep everything on this computer."""
+        self._clear()
+        outer = tk.Frame(self.root, bg=THEME["bg"])
+        outer.pack(fill="both", expand=True)
+        self.screen = outer
+        box = tk.Frame(outer, bg=THEME["panel"], padx=self.S(36), pady=self.S(30))
+        box.place(relx=0.5, rely=0.5, anchor="center")
+        self.label(box, APP_NAME, 20, "bold").pack(anchor="w")
+        self.label(box, "Do you want to connect to a RomM server?", 11,
+                   fg=THEME["muted"]).pack(anchor="w", pady=(0, self.S(18)))
+        self.welcome_buttons = {}
+        for key, title, text, command in (
+            ("romm", "Connect to RomM", "Play the games in your RomM library. Saves are kept in RomM, "
+                                        "so they follow you to other computers.", self.show_login),
+            ("local", "Play without RomM", f"Play games from a folder on this computer "
+                                           f"({roms_root(self.launcher.config)}). Everything stays here.",
+             self.use_local),
+        ):
+            b = self.button(box, title, command, primary=key == "romm", size=11)
+            b.pack(fill="x", pady=(self.S(6), self.S(2)))
+            self.label(box, text, 9, fg=THEME["muted"], wraplength=self.S(360), justify="left",
+                       anchor="w").pack(fill="x", pady=(0, self.S(10)))
+            self.welcome_buttons[key] = b
+        self.label(box, "You can change this later.", 8, fg=THEME["muted"]).pack(anchor="w", pady=(self.S(4), 0))
+        self.welcome_buttons["romm"].focus_set()
+
+    def use_local(self) -> None:
+        """Play without RomM: the library is the ROM folder, and saves stay on this computer."""
+        self.launcher.use_romm(False)
+        try:
+            roms_root(self.launcher.config).mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass  # shown as an empty library; Settings can point elsewhere
+        self.after_login()
 
     def show_login(self, message: str = "", kind: str = "fail") -> None:
         """Ask for the RomM address, username and password, like the command line does."""
@@ -324,6 +370,14 @@ class GuiApp:
         self.login_btn.pack(side="left")
         if paths.LIBRARY_CACHE.exists():
             self.button(buttons, "Play offline", self.play_offline).pack(side="left", padx=self.S(10))
+        local = self.label(box, "No RomM? Play games from a folder on this computer  →", 9,
+                           fg=THEME["muted"], cursor="hand2")
+        local.pack(anchor="w", pady=(self.S(16), 0))
+        local.bind("<Enter>", lambda e: local.config(fg=THEME["text"]))
+        local.bind("<Leave>", lambda e: local.config(fg=THEME["muted"]))
+        local.bind("<Button-1>", lambda e: self.use_local())
+        self.tooltip(local, "Saves stay on this computer; nothing is sent to RomM. You can connect later.")
+        self.local_link = local
         self.address_line = None
         if not ask_url:
             self.address_line = tk.Frame(outer, bg=THEME["bg"])
@@ -398,7 +452,7 @@ class GuiApp:
                 self.login_msg.config(text=text, fg=THEME["fail"])
                 return
             cfg = self.launcher.config
-            cfg["romm_url"], cfg["username"] = url, user
+            cfg["romm_url"], cfg["username"], cfg["use_romm"] = url, user, True
             if HAVE_KEYRING:
                 try:
                     if remember:
@@ -425,6 +479,13 @@ class GuiApp:
             else:
                 self.log("RetroArch wasn't found. Set where it is in Settings.", "warn")
         self.load_library()
+
+    def connect_romm(self) -> None:
+        """From the library without RomM: go to the login (logging in switches to RomM)."""
+        if self.busy:
+            return
+        self.games, self.selected = [], None
+        self.show_login("Log in to use your RomM library. Until you do, nothing changes.", "muted")
 
     def log_out(self) -> None:
         if self.busy:
@@ -467,10 +528,11 @@ class GuiApp:
         self.v_search = tk.StringVar()
         self.v_search.trace_add("write", lambda *a: self.refresh_grid())
         self._build_search(head).pack(side="right")
-        if self.launcher.client:
+        if self.launcher.client or not self.launcher.uses_romm:
             self.add_button = self.pill(head, "+  Add game", self.add_files, kind="chip", size=9, height=self.S(34))
             self.add_button.pack(side="right", padx=(0, self.S(10)))
-            self.tooltip(self.add_button, "Add game files you own to RomM")
+            self.tooltip(self.add_button, "Add game files you own to RomM" if self.launcher.uses_romm
+                         else f"Copy game files you own into {roms_root(self.launcher.config)}")
 
         self.chip_row = tk.Frame(center, bg=THEME["bg"], height=self.S(30))
         self.chip_row.pack(fill="x", padx=(self.S(30), self.S(26)), pady=(self.S(16), self.S(12)))
@@ -527,15 +589,22 @@ class GuiApp:
             icon.set_active(active)
             icon.pack(pady=(self.S(18) if i == 0 else self.S(6), 0))
         cfg = self.launcher.config
-        where = "offline" if not self.launcher.client else urllib.parse.urlsplit(cfg.get("romm_url", "")).hostname
-        user = cfg.get("username", "") or "?"
+        if not self.launcher.uses_romm:
+            where = f"without RomM · games in {roms_root(cfg)}"
+            user = os.environ.get("USERNAME") or os.environ.get("USER") or "?"
+        else:
+            where = "offline" if not self.launcher.client else urllib.parse.urlsplit(cfg.get("romm_url", "")).hostname
+            user = cfg.get("username", "") or "?"
         size = self.S(34)
         avatar = tk.Canvas(rail, width=size, height=size, bg=THEME["rail"], highlightthickness=0)
         avatar.create_oval(1, 1, size - 1, size - 1, fill=THEME["chip"], outline=THEME["chip"])
         avatar.create_text(size / 2, size / 2, text=user[:1].upper(), fill=THEME["text"], font=self.font(11, "bold"))
         avatar.pack(side="bottom", pady=(self.S(8), self.S(18)))
         self.tooltip(avatar, f"{user} · {where}")
-        self.rail_icon(rail, "⎋", "Log out", self.log_out).pack(side="bottom")
+        if self.launcher.uses_romm:
+            self.rail_icon(rail, "⎋", "Log out", self.log_out).pack(side="bottom")
+        else:
+            self.rail_icon(rail, "☁", "Connect to a RomM server", self.connect_romm).pack(side="bottom")
 
     def rail_icon(self, parent, glyph, tip, command):
         """An icon button for the rail; .set_active(on) marks the screen that's showing."""
@@ -650,7 +719,10 @@ class GuiApp:
             self.refresh_chips()
             self.refresh_grid()
             self.show_details(self.selected)
-            self.set_status(f"{len(self.games)} games · {len(self.local_ids)} installed")
+            if self.launcher.uses_romm:
+                self.set_status(f"{len(self.games)} games · {len(self.local_ids)} installed")
+            else:
+                self.set_status(f"{len(self.games)} games in {roms_root(self.launcher.config)}")
             self.load_covers()
 
         self.run_task(work, done)
@@ -710,7 +782,7 @@ class GuiApp:
         for w in self.chip_row.winfo_children():
             w.destroy()
         self.chips = {}
-        for key, text, count in library_filters(self.games, self.local_ids):
+        for key, text, count in library_filters(self.games, self.local_ids, show_local=self.launcher.uses_romm):
             if key == ALL_GAMES:
                 name = "All"
             elif key == LOCAL_GAMES:
@@ -766,6 +838,10 @@ class GuiApp:
         if not shown:
             text = "Nothing matches your search." if query.strip() else (
                 "No games here yet." if self.games else "Loading…")
+            if not self.games and not self.launcher.uses_romm and not self.busy:
+                folder = roms_root(self.launcher.config)
+                text = (f"No games yet. Put them in a folder per platform in {folder}\n"
+                        f"({folder / 'n64'}, {folder / 'gba'}, …), or use + Add game.")
             self.label(self.grid_frame, text, 11, fg=THEME["muted"], bg=THEME["bg"]).grid(
                 padx=self.S(10), pady=self.S(30))
         self.grid_frame.update_idletasks()
@@ -932,7 +1008,9 @@ class GuiApp:
                 b.set_enabled(not self.busy)
 
         played = entry.get("last_played", "")
-        if entry.get("pending_upload"):
+        if not self.launcher.uses_romm:
+            save, color = "On this computer", THEME["text"]
+        elif entry.get("pending_upload"):
             save, color = "Waiting to upload to RomM", THEME["warn"]
         elif not game.syncs_saves:
             save, color = "Not synced for this platform", THEME["muted"]
@@ -1054,11 +1132,12 @@ class GuiApp:
     # ----- adding games ---------------------------------------------------
 
     def add_files(self) -> None:
-        """Pick game files you own and add them to RomM (the launcher asks which platform)."""
-        if self.busy or not self.launcher.client:
+        """Pick game files you own and add them to RomM, or without RomM copy them into the ROM
+        folder (the launcher asks which platform)."""
+        if self.busy or (self.launcher.uses_romm and not self.launcher.client):
             return
         files = filedialog.askopenfilenames(
-            parent=self.root, title="Add games you own to RomM",
+            parent=self.root, title="Add games you own" + (" to RomM" if self.launcher.uses_romm else ""),
             filetypes=[("Game files", " ".join(f"*{ext}" for ext in sorted(ROM_PLATFORMS)) + " *.zip *.7z"),
                        ("All files", "*.*")])
         if not files:
@@ -1505,9 +1584,10 @@ class GuiApp:
         self.run_task(lambda: self.launcher.download_port(port), done)
 
     def on_close(self) -> None:
+        later = (" If you quit now, its save is uploaded the next time you play it."
+                 if self.launcher.uses_romm else "")
         if self.busy and getattr(self, "playing", None) and not messagebox.askyesno(
-            APP_NAME, "A game is still running. If you quit now, its save is uploaded the next "
-                      "time you play it.\n\nQuit anyway?", parent=self.root, default="no"):
+            APP_NAME, f"A game is still running.{later}\n\nQuit anyway?", parent=self.root, default="no"):
             return
         self.root.destroy()
 
@@ -1533,7 +1613,7 @@ def run_gui() -> int:
         return 1
     set_ui(GuiUI(gui))
     try:
-        gui.show_login()
+        gui.start()
         gui.root.mainloop()
     finally:
         set_ui(TerminalUI())

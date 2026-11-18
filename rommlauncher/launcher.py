@@ -20,7 +20,7 @@ from . import system
 from .config import config_for_disk, load_config, roms_root
 from .core_downloads import CoreInstallError, core_info_dir, install_core, install_core_info
 from .dualscreen import SCREEN_CHOICES, SCREEN_LAYOUTS, TOUCH_CONTROLS
-from .games import Game, filter_games, guess_platform, index_roms, unpack_zip
+from .games import Game, filter_games, guess_platform, index_roms, local_roms, platform_name, unpack_zip
 from .ports import (
     PLAYERS,
     PORTS,
@@ -88,18 +88,70 @@ class Launcher:
     def save_config(self) -> None:
         save_json(paths.CONFIG_FILE, config_for_disk(self.config))
 
+    @property
+    def uses_romm(self) -> bool:
+        """False when the player chose to play without RomM: the library is then the ROM
+        folder, and saves stay on this computer (nothing is synced or uploaded)."""
+        return bool(self.config.get("use_romm", True))
+
     def needs_setup(self) -> bool:
-        return not paths.CONFIG_FILE.exists() or not self.config.get("username") or not self.config.get("romm_url")
+        if not paths.CONFIG_FILE.exists():
+            return True
+        return self.uses_romm and (not self.config.get("username") or not self.config.get("romm_url"))
 
     def needs_retroarch_setup(self) -> bool:
         """True when config.json came from another system and has no paths for this one."""
         return system.OS_KEY not in self.config
 
+    def use_romm(self, on: bool) -> None:
+        """Switch between RomM and playing without it (the RomM login is kept either way)."""
+        self.config["use_romm"] = on
+        if not on:
+            self.client, self.offline = None, False
+        self.save_config()
+
     def setup(self) -> None:
         cfg = self.config
         print()
         say(bold("Setup") + dim("  (press Enter to keep the value in [brackets])"))
+        answer = choose(
+            "Do you want to connect to a RomM server?",
+            [("1", "Yes: play the games in my RomM library, with the saves kept in RomM"),
+             ("2", "No: play games from a folder on this computer; everything stays on it")],
+            "Choice (q to quit)", default="1" if self.uses_romm else "2", cancel=True,
+        )
+        if answer is None:
+            raise Quit
+        cfg["use_romm"] = answer == "1"
         print()
+        if cfg["use_romm"]:
+            self.setup_romm()
+        current = roms_root(cfg)
+        answer = ask("Folder for ROMs" if cfg["use_romm"] else "Folder with your games", str(current))
+        if Path(answer).expanduser() != current:
+            here = cfg.setdefault(system.OS_KEY, {})
+            if Path(answer).expanduser().is_absolute():
+                here["roms_dir"] = answer  # a full path only makes sense on this system
+            else:
+                here.pop("roms_dir", None)
+                cfg["roms_dir"] = answer
+        if not cfg["use_romm"]:
+            folder = roms_root(cfg)
+            try:
+                folder.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                warn(f"Couldn't make {folder} ({exc}).")
+            say(dim(f"Put each game in a folder named after its platform: {folder / 'n64'}, "
+                    f"{folder / 'gba'}, {folder / 'snes'}, …"))
+            say(dim("(--add copies game files there for you.)"))
+        self.setup_retroarch()
+        for port in PORTS.values():
+            print()
+            self.setup_port(port)
+
+    def setup_romm(self) -> None:
+        """Ask for the RomM address and login, and check them."""
+        cfg = self.config
         url = ask("RomM address (e.g. https://romm.example.com)", cfg["romm_url"]).rstrip("/")
         while not url:
             url = ask("RomM address (required)").rstrip("/")
@@ -127,21 +179,7 @@ class Launcher:
                     warn(f"Could not use the keyring ({exc}); you'll be asked each time.")
         else:
             say(dim("Tip: install python3-keyring and the password is remembered securely."))
-
         print()
-        current = roms_root(cfg)
-        answer = ask("Folder for ROMs", str(current))
-        if Path(answer).expanduser() != current:
-            here = cfg.setdefault(system.OS_KEY, {})
-            if Path(answer).expanduser().is_absolute():
-                here["roms_dir"] = answer  # a full path only makes sense on this system
-            else:
-                here.pop("roms_dir", None)
-                cfg["roms_dir"] = answer
-        self.setup_retroarch()
-        for port in PORTS.values():
-            print()
-            self.setup_port(port)
 
     def setup_retroarch(self) -> None:
         """Ask for RetroArch's paths on this system and save them in its section."""
@@ -317,7 +355,7 @@ class Launcher:
 
     def connect(self) -> None:
         """Log in to RomM. On a network problem, offer to continue offline."""
-        if self.client:
+        if self.client or not self.uses_romm:
             return
         for attempt in range(3):
             client = RommClient(self.config["romm_url"], self.config["username"], self.ask_password(force=attempt > 0), timeout=15)
@@ -341,6 +379,8 @@ class Launcher:
     # ----- library ------------------------------------------------------
 
     def library(self) -> list[Game]:
+        if not self.uses_romm:  # the games in the ROM folder
+            return [Game(r, self.config) for r in local_roms(roms_root(self.config), self.config)]
         if self.client:
             say(dim("Loading your library…"))
             roms = self.client.list_roms()
@@ -384,7 +424,13 @@ class Launcher:
 
     def pick_game(self, games: list[Game], query: str | None) -> Game | None:
         if not games:
-            fail("Your RomM library is empty." if not self.offline else "No games on this computer yet.")
+            if not self.uses_romm:
+                folder = roms_root(self.config)
+                fail(f"No games in {folder} yet.")
+                say(f"Put each game in a folder named after its platform ({folder / 'n64'}, "
+                    f"{folder / 'gba'}, …), or add them with --add <file>.")
+            else:
+                fail("Your RomM library is empty." if not self.offline else "No games on this computer yet.")
             return None
         while True:
             shown = filter_games(games, query) if query else games
@@ -417,6 +463,9 @@ class Launcher:
         if local:
             ok(f"ROM: {local}")
             return local
+        if not self.uses_romm:
+            fail(f"{game.rom['fs_name']} isn't in {roms_root(self.config)} any more.")
+            return None
         if not self.client:
             fail("The ROM isn't on this computer, and RomM can't be reached to download it.")
             return None
@@ -665,7 +714,9 @@ class Launcher:
         save = self.save_for(game, rom_file, player)
         remote_hash: str | None = None
         synced = False
-        if not save and port:
+        if not self.uses_romm:
+            pass  # no RomM: the save on this computer is the only one
+        elif not save and port:
             warn(f"{port.name} isn't set up on this computer, so its save isn't synced.")
         elif not save:
             warn(f"This game's save can't be synced with RomM (unknown save location for {game.platform_name}).")
@@ -743,6 +794,10 @@ class Launcher:
         if port:
             port.cleanup(self.config)
 
+        if not self.uses_romm:
+            if save and save.hash() not in (None, hash_before):
+                ok(f"Game saved on this computer: {save.location}")
+            return
         if not save:
             return
         local_hash = save.hash()
@@ -770,6 +825,8 @@ class Launcher:
                 say(dim("Still waiting…"))
 
     def upload(self, game: Game, save: "Save") -> bool:
+        if not self.uses_romm:  # nothing ever leaves this computer
+            return False
         local_hash = save.hash()
         data = save.read()
         if not self.client:
@@ -817,7 +874,9 @@ class Launcher:
         save_json(paths.STATE_FILE, self.state)
 
     def retry_pending(self, games: list[Game]) -> None:
-        pending = [g for g in games if self.state.get(str(g.id), {}).get("pending_upload")]
+        if not self.uses_romm:
+            return
+        pending =[g for g in games if self.state.get(str(g.id), {}).get("pending_upload")]
         for game in pending:
             rom_file = game.find_local_rom()
             player = self.state[str(game.id)].get("pending_player")
@@ -828,6 +887,10 @@ class Launcher:
             self.upload(game, save)
 
     def upload_now(self, game: Game) -> None:
+        if not self.uses_romm:
+            fail("The launcher is set up without RomM, so saves stay on this computer "
+                 "(--setup connects it to a RomM server).")
+            return
         rom_file = game.find_local_rom()
         if not rom_file:
             fail(f"{game.name} isn't on this computer, so there's no save to upload.")
@@ -852,7 +915,11 @@ class Launcher:
         (the file's extension suggests one); this is also their confirmation. A platform that
         isn't on their RomM yet is created for it. Nothing on RomM is replaced: a file of the
         same name is refused. The file is also put in the ROM folder, so the game
-        doesn't have to be downloaded again to play it."""
+        doesn't have to be downloaded again to play it.
+
+        Without RomM, the file is only copied into the ROM folder (add_local_rom)."""
+        if not self.uses_romm:
+            return self.add_local_rom(path, platform, name)
         if not self.client:
             fail("Adding games needs a connection to RomM.")
             return False
@@ -922,4 +989,47 @@ class Launcher:
             ok(f"{name} is in your library.")
         else:
             warn(f"RomM's scan ended as \"{status}\". If the game doesn't appear, scan in RomM's web page.")
+        return True
+
+    def add_local_rom(self, path: Path, platform: str | None = None, name: str | None = None) -> bool:
+        """Without RomM: copy a game file into <ROM folder>/<platform>/, which is the library.
+        The player picks the platform (the file's extension suggests one). Nothing is
+        replaced; the picked file itself stays where it is."""
+        name = name or path.name
+        size = path.stat().st_size
+        folder = roms_root(self.config)
+        if not platform:
+            options = sorted(((slug, platform_name(slug)) for slug in self.config["platforms"]),
+                             key=lambda o: o[1].lower())
+            guess = guess_platform(name)
+            platform = choose(f"Add {name} ({human_size(size)}) as a game for:", options, "Platform",
+                              default=guess if guess in self.config["platforms"] else "", cancel=True,
+                              note=f"It's copied into {folder}; the file you picked stays where it is.")
+            if platform is None:
+                return False
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", platform):
+            fail(f"\"{platform}\" isn't a platform folder name.")
+            return False
+        dest = folder / platform / name
+        if dest.exists():
+            if path.resolve() == dest.resolve():
+                ok(f"{name} is already in your library.")
+            else:
+                warn(f"There's already a {name} in {dest.parent}; nothing was changed.")
+            return False
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        part = dest.with_name(dest.name + ".part")
+        progress = progress_bar(f"Copying {name}", size)
+        try:
+            with path.open("rb") as src, part.open("wb") as out:
+                done = 0
+                while chunk := src.read(1024 * 1024):
+                    out.write(chunk)
+                    done += len(chunk)
+                    progress(done)
+            part.replace(dest)
+        finally:
+            progress.finish()
+            part.unlink(missing_ok=True)
+        ok(f"{name} added: {dest}")
         return True

@@ -12,6 +12,8 @@ on another.
 - Your saves are never thrown away: anything that gets replaced is backed up first.
 - Works offline with games you've already downloaded; saves upload the next time you're online.
 - Add games you own (your own cartridge dumps) to RomM from the launcher.
+- **No RomM server? It works without one too:** your games come from a folder on your
+  computer and your saves stay there (see [Without RomM](#without-romm)).
 - Plays Ocarina of Time in [Ship of Harkinian](https://www.shipofharkinian.com), Majora's
   Mask in [2 Ship 2 Harkinian](https://github.com/2ship2harkinian/2ship2harkinian) and Super
   Mario 64 in [sm64coopdx](https://github.com/coop-deluxe/sm64coopdx) (with online co-op),
@@ -23,7 +25,8 @@ on another.
 - **RetroArch**. On Windows, the standalone build from retroarch.com. On Linux, the
   **Flatpak** from Flathub (`flatpak install flathub org.libretro.RetroArch`). Missing cores
   are downloaded automatically when you first play a game that needs them.
-- A **RomM** server (tested with RomM 5.4) and an account on it.
+- Optional: a **RomM** server (tested with RomM 5.4) and an account on it. Without one,
+  the launcher plays games from a folder on your computer.
 - Optional: the `keyring` package (`pip install keyring`, or `python3-keyring` on
   Debian/Ubuntu) so your RomM password is remembered securely. Without it you're asked
   for the password each time. The password is never written to disk.
@@ -38,8 +41,34 @@ python3 romm_launcher.py
 
 (On Windows: `python romm_launcher.py` or `py romm_launcher.py`.)
 
-The first run asks for your RomM address, username and password, and where RetroArch is.
+The first run asks whether you want to connect to a RomM server. If you do, it asks for
+your RomM address, username and password; if not, which folder your games are in (and
+nothing is ever sent anywhere). Then it asks where RetroArch is.
 After that you get a list of your library: type a number or part of a name to play.
+
+## Without RomM
+
+Answer **No** to "Do you want to connect to a RomM server?" (in the window: **Play without
+RomM**) and the launcher works on its own:
+
+- Your library is the ROM folder (`roms/` in the launcher's folder unless you pick
+  another). Put each game in a folder named after its platform, the way RomM names them:
+  `roms/n64/`, `roms/gba/`, `roms/snes/`, `roms/psx/`, … (see [Platforms](#platforms)).
+  A file straight in `roms/`, or in a folder with another name, gets its platform from its
+  extension (`.z64` → N64, `.gba` → GBA, …). A folder inside a platform folder is one game
+  of several files (it plays the `.m3u` in it, else the biggest file); a `.cue` and the
+  `.bin` tracks it names are one game.
+- `--add game.gba` (in the window: **+ Add game**) copies files you own into the right
+  platform folder for you.
+- Saves stay where RetroArch (or the PC port) writes them. Nothing is synced, uploaded or
+  backed up by the launcher, and `--upload` isn't available.
+- Everything else works the same: cores are downloaded when needed, the PC ports, the
+  DS/3DS screen layouts.
+
+To connect to a RomM server later, run `--setup` (or, in the window, the ☁ button at the
+bottom left). Your saves on this computer are then uploaded the first time you play each
+game with RomM. To go back, answer No in `--setup`, or use "No RomM?" on the window's
+login screen.
 
 ## The window (`--gui`)
 
@@ -49,6 +78,9 @@ python3 romm_launcher.py --gui
 
 Opens the launcher as a window, like a game store's library:
 
+- **The first time**, choose **Connect to RomM** or **Play without RomM** (see
+  [Without RomM](#without-romm)). Without RomM the window opens straight on your games
+  from then on, and the ☁ button at the bottom left connects to a RomM server later.
 - **Sign in** with your RomM address, username and password (the same as in the
   terminal; with `keyring` installed you can have the password remembered). After the
   first time, only the username and password are asked; the address is shown under the
@@ -91,13 +123,13 @@ terminal window on Windows, use `pythonw romm_launcher.py --gui`.
 | `romm_launcher.py zelda` | Play the game matching "zelda" (asks if several match) |
 | `romm_launcher.py --list` | Show your library |
 | `romm_launcher.py --upload zelda` | Upload this computer's save of a game to RomM |
-| `romm_launcher.py --add game.gba` | Add game files you own to RomM (asks for the platform) |
+| `romm_launcher.py --add game.gba` | Add game files you own to RomM, or without RomM to the ROM folder (asks for the platform) |
 | `romm_launcher.py --no-launch zelda` | Download the ROM and save, but don't start RetroArch |
 | `romm_launcher.py --screen main mario` | DS/3DS: pick the screen layout without asking (`main`, `both` or `corner`) |
 | `romm_launcher.py --with soh ocarina` | Ocarina of Time: play it in Ship of Harkinian (`soh`) or RetroArch (`retroarch`) without asking |
 | `romm_launcher.py --with 2ship majora` | Majora's Mask: play it in 2 Ship 2 Harkinian (`2ship`) or RetroArch without asking |
 | `romm_launcher.py --with sm64coopdx mario 64` | Super Mario 64: play it in sm64coopdx (`sm64coopdx`) or RetroArch without asking |
-| `romm_launcher.py --setup` | Change the RomM address, login, RetroArch paths or the PC ports |
+| `romm_launcher.py --setup` | Choose RomM or no RomM; change the RomM address, login, RetroArch paths or the PC ports |
 | `romm_launcher.py --paths` | Show where settings, ROMs and save backups are kept |
 
 **When you're done playing:** press F1 → **Close Content** (this makes RetroArch write the
@@ -335,11 +367,11 @@ Everything the launcher keeps is in its own folder, next to the script:
 romm-launcher/
   romm_launcher.py   start the launcher with this
   rommlauncher/      the launcher's code
-  config.json     settings (RomM address, username, RetroArch paths, cores)
+  config.json     settings (RomM or not, RomM address, username, RetroArch paths, cores)
   state.json      what was last synced, per game
   library.json    your library, cached for offline play
   backups/        replaced saves
-  roms/           downloaded games (RomM has the real copies)
+  roms/           downloaded games (RomM has the real copies); without RomM, your games
   covers/         cover art for the window
   soh/            Ship of Harkinian, if the launcher downloaded it (with its settings and saves)
   2ship/          2 Ship 2 Harkinian, likewise
