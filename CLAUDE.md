@@ -1,7 +1,8 @@
 # RomM Launcher
 
 A Python app for playing games from a self-hosted **RomM** library locally in RetroArch,
-with RomM as the home of the saves. It runs on Windows and Linux, in the terminal
+with RomM as the home of the saves, or (since 2026-11-18, at the user's request) without
+RomM at all: games from the ROM folder, saves kept on the computer. It runs on Windows and Linux, in the terminal
 (default) or as a window (`--gui`, Tkinter, a game-store style library; work on the `gui`
 branch since 2026-11-16). `romm_launcher.py` is only the start script; the code is the
 `rommlauncher/` package (split from one file on 2026-11-16, at the user's request, to
@@ -15,7 +16,25 @@ usernames) belongs in the committed files.
 Usage: `romm_launcher.py` (pick from library), `romm_launcher.py zelda` (straight to a match),
 `--list`, `--upload <game>`, `--add <file>...` (add game files to RomM), `--no-launch`, `--screen main|both|corner`,
 `--with soh|2ship|sm64coopdx|retroarch`, `--gui`, `--setup`, `--paths` (alias `--backups`).
-First run asks for setup.
+First run asks for setup, starting with "Do you want to connect to a RomM server?".
+
+**Without RomM** (config `use_romm: false`, `Launcher.uses_romm`; default true, so older
+configs keep RomM). `needs_setup` then needs no address/login, `connect` does nothing,
+`library` is `games.local_roms(roms_root)`: `<roms>/<platform>/<file>` (folder name =
+RomM fs_slug; another folder name or a file straight in `roms/` → `guess_platform` by
+extension; a subfolder = a multi-file game; files a `.cue`/`.m3u`/`.gdi`/`.ccd` names and
+`NOT_GAMES` extensions are skipped). Those ROM records have `id` `"local-<sha1 of the
+relative path>"` (so `Game.id` is `int | str`), `local_path` (`find_local_rom` uses it) and
+`platform_display_name` from `PLATFORM_NAMES`; `library.json` isn't written. `play`
+doesn't sync, upload or mark anything pending (says "Game saved on this computer");
+`upload`, `retry_pending` and `upload_now` refuse; `add_rom` → `add_local_rom` (copies
+into `<roms>/<platform>/` via `.part`, never replaces). Setup: `Launcher.setup` asks
+first (`setup_romm` for the address/login), `use_romm(on)` switches. GUI: `start()`
+shows `show_welcome` (Connect to RomM / Play without RomM) when there's no config yet,
+goes straight to the library without RomM, else `show_login` (which has a "No RomM?"
+link → `use_local`); without RomM the rail's ☁ (`connect_romm`) replaces Log out, a
+successful login sets `use_romm` true, and there's no "Installed" chip
+(`library_filters(show_local=False)`).
 
 Flow when a game is picked:
 1. Make sure the ROM is in `<ROM folder>/<platform fs_slug>/<fs_name>` (also accepts the
@@ -71,8 +90,8 @@ downwards in this list (no import cycles; type-only imports use `TYPE_CHECKING`)
 | `romm.py` | `RommClient` (+ safety lock `_check`, `ALLOWED_WRITES`; `upload_rom`, `start_scan`, `wait_for_task`, `list_platforms`), `RommError`, `LoginError` |
 | `saves.py` | `FileSave`, `FolderSave`, 3DS title ID helpers, `backup_bytes`/`backup_file`, `RemoteSave`, `fetch_remote`, `decide` |
 | `ports.py` | PC ports: `Port` (`plays`, `archive_for`, `program`, `installed`, `data_dir`, `saves_dir`, `launch`, `cleanup`, `save`, `find`; download: `install_dir`, `latest_release`, `install`), `SHIP_OF_HARKINIAN`, `TWO_SHIP`, `COOP_DX`, `PORTS`, `port_for`, `player_choices`, `PortSave`, `unpacked_rom`, `place_rom`/`big_endian_n64`/`RomMismatch`, `PortInstallError`, `GITHUB_API`/`GITHUB`, `SOH`/`TWOSHIP`/`SM64COOPDX`/`RETROARCH`/`PLAYERS` |
-| `games.py` | `Game`, `index_roms`, `unpack_zip`, `filter_games`, GUI library helpers (`library_filters`, `filter_library`, `local_game_ids`), `fetch_cover`, `ROM_PLATFORMS`/`guess_platform`, `game_facts` |
-| `launcher.py` | `Launcher` (setup, login, library, picker, `play`, `upload`, `retry_pending`, `add_rom`, ...) |
+| `games.py` | `Game`, `index_roms`, `unpack_zip`, `filter_games`, without RomM `local_roms`/`game_entries`/`PLATFORM_NAMES`/`platform_name`, GUI library helpers (`library_filters`, `filter_library`, `local_game_ids`), `fetch_cover`, `ROM_PLATFORMS`/`guess_platform`, `game_facts` |
+| `launcher.py` | `Launcher` (`uses_romm`/`use_romm`, setup, `setup_romm`, login, library, picker, `play`, `upload`, `retry_pending`, `add_rom`, `add_local_rom`, ...) |
 | `gui.py` | `GuiUI`, `GuiProgress`, `GuiApp`, `run_gui` |
 | `cli.py` | `main()` (argparse; `--gui` goes to `run_gui`) |
 
@@ -292,7 +311,7 @@ prints it all.
 romm-launcher/
   romm_launcher.py, rommlauncher/, tests/, README.md, CLAUDE.md, LICENSE, .gitignore   the code (in git)
   CLAUDE.local.md  notes about your own setup (git-ignored)
-  config.json      RomM URL, username, ROM folder, platform cores; RetroArch paths per system (mode 600)
+  config.json      use_romm, RomM URL, username, ROM folder, platform cores; RetroArch paths per system (mode 600)
   state.json       per RomM ROM id: last synced hash/time, last_played, pending_upload
   library.json     cached library, for offline play
   backups/<rom_id>/  last 20 replaced saves (3DS saves as .zip)

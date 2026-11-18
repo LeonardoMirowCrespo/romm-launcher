@@ -1622,5 +1622,143 @@ del ui.input
 check("add_rom: a platform new in your RomM is created first", added
       and any(p["fs_slug"] == "snes" for p in PLATFORMS) and STORE["new_roms"][("snes", "My Game.sfc")] == snes.read_bytes())
 
+# ---- Without RomM: the library is the ROM folder; nothing is synced or uploaded ------
+local_home = tmp / "local"
+lroms = local_home / "roms"
+(lroms / "n64").mkdir(parents=True)
+(lroms / "n64" / "Mario.z64").write_bytes(b"rom")
+(lroms / "n64" / "notes.txt").write_text("not a game")
+(lroms / "n64" / ".hidden.z64").write_bytes(b"x")
+(lroms / "n64" / "Wave.z64.part").write_bytes(b"half")
+(lroms / "My N64 Games").mkdir()
+(lroms / "My N64 Games" / "Zelda.n64").write_bytes(b"z")
+(lroms / "psx" / "Multi Disc").mkdir(parents=True)
+(lroms / "psx" / "Game.cue").write_text('FILE "Game (Track 1).bin" BINARY\n')
+(lroms / "psx" / "Game (Track 1).bin").write_bytes(b"b" * 10)
+(lroms / "psx" / "Multi Disc" / "Disc 1.chd").write_bytes(b"1" * 5)
+(lroms / "psx" / "Multi Disc" / "Multi Disc.m3u").write_text("Disc 1.chd\n")
+(lroms / "Loose.gba").write_bytes(b"g")
+(lroms / "readme.txt").write_text("x")
+lcfg = config.default_config()
+lcfg.update(use_romm=False, roms_dir=str(lroms), retroarch=str(ra / "retroarch"), cores_dir=str(ra / "cores"),
+            saves_dir=str(local_home / "saves"))
+found = {r["name"]: r for r in games.local_roms(lroms, lcfg)}
+check("local: games found in the ROM folder", sorted(found) == ["Game", "Loose", "Mario", "Multi Disc", "Zelda"])
+check("local: platform from the folder, else the extension",
+      [found[n]["platform_fs_slug"] for n in ("Mario", "Zelda", "Loose", "Game")] == ["n64", "n64", "gba", "psx"]
+      and found["Mario"]["platform_display_name"] == "Nintendo 64")
+check("local: a folder is one game of several files", found["Multi Disc"]["has_multiple_files"]
+      and games.Game(found["Multi Disc"], lcfg).find_local_rom() == lroms / "psx" / "Multi Disc" / "Multi Disc.m3u")
+check("local: stable ids", games.local_roms(lroms, lcfg)[0]["id"] == games.local_roms(lroms, lcfg)[0]["id"]
+      and all(str(r["id"]).startswith("local-") for r in found.values()))
+
+saved_paths = (paths.CONFIG_FILE, paths.STATE_FILE, paths.APP_HOME)
+paths.CONFIG_FILE, paths.STATE_FILE, paths.APP_HOME = local_home / "config.json", local_home / "state.json", local_home
+util.save_json(paths.CONFIG_FILE, lcfg)
+real_check = romm.RommClient._check
+
+
+def no_romm(self, method, url, *a, **kw):
+    raise AssertionError(f"RomM was contacted without RomM: {method} {url}")
+
+
+romm.RommClient._check = no_romm
+loc = launcher.Launcher()
+check("local: no setup needed without a RomM address", not loc.needs_setup() and not loc.uses_romm)
+loc.connect()
+check("local: no login", loc.client is None and not loc.offline)
+cache_before = paths.LIBRARY_CACHE.read_bytes()
+mario = [g for g in loc.library() if g.name == "Mario"][0]
+check("local: library is the ROM folder, RomM's cached library untouched",
+      mario.find_local_rom() == lroms / "n64" / "Mario.z64" and paths.LIBRARY_CACHE.read_bytes() == cache_before)
+mario_save = mario.save_path(lroms / "n64" / "Mario.z64")
+
+
+class FakeLocalRetroArch:
+    def __init__(self, args, **kw):
+        launched.append(args)
+        mario_save.parent.mkdir(parents=True, exist_ok=True)
+        mario_save.write_bytes(b"L" * 512)
+
+    def wait(self):
+        return 0
+
+
+subprocess.Popen = FakeLocalRetroArch
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    loc.play(mario, player="retroarch")
+subprocess.Popen = real_popen
+entry = loc.state[str(mario.id)]
+check("local: game started", launched[-1][-1] == str(lroms / "n64" / "Mario.z64"))
+check("local: save stays, nothing pending", mario_save.read_bytes() == b"L" * 512
+      and "saved on this computer" in out.getvalue() and not entry.get("pending_upload") and "hash" not in entry
+      and entry.get("last_played"))
+with contextlib.redirect_stdout(io.StringIO()):
+    check("local: upload refused, nothing marked", loc.upload(mario, saves.FileSave(mario_save)) is False
+          and not loc.state[str(mario.id)].get("pending_upload"))
+    loc.upload_now(mario)
+ui.input = lambda prompt: ""  # Enter: the platform the .gba suggests
+with contextlib.redirect_stdout(io.StringIO()):
+    added = loc.add_rom(mine)
+    again = loc.add_rom(mine)
+del ui.input
+check("local: add copies into <ROM folder>/<platform>/", added and (lroms / "gba" / mine.name).read_bytes()
+      == mine.read_bytes() and not list((lroms / "gba").glob("*.part")))
+check("local: adding the same file twice changes nothing", again is False)
+check("local: added game is in the library", any(g.name == "My Homebrew" and g.platform == "gba" for g in loc.library()))
+with contextlib.redirect_stdout(io.StringIO()):
+    check("local: bad platform name refused", loc.add_local_rom(snes, platform="../x") is False)
+
+# Setup asks first whether to use RomM at all.
+fresh = launcher.Launcher()
+fresh.config["use_romm"] = True
+fresh.setup_retroarch = lambda: None
+fresh.setup_port = lambda port: False
+answers = ["2", str(local_home / "other-roms")]
+ui.input = lambda prompt: answers.pop(0)
+with contextlib.redirect_stdout(io.StringIO()):
+    fresh.setup()
+del ui.input
+check("setup: 'No' to RomM asks no address or login", fresh.config["use_romm"] is False and not answers
+      and (local_home / "other-roms").is_dir())
+fresh.use_romm(True)
+check("switching back to RomM is saved", util.load_json(paths.CONFIG_FILE, {})["use_romm"] is True
+      and launcher.Launcher().needs_setup())
+
+# The window: the first start asks RomM or not; without RomM it goes straight to the library.
+paths.APP_HOME = local_home / "gui"  # the default ROM folder, "roms", is in here
+paths.CONFIG_FILE, paths.STATE_FILE = paths.APP_HOME / "config.json", paths.APP_HOME / "state.json"
+(paths.APP_HOME / "roms" / "n64").mkdir(parents=True)
+(paths.APP_HOME / "roms" / "n64" / "Kart.z64").write_bytes(b"k")
+try:
+    window = gui.GuiApp()
+except Exception as exc:
+    window = None
+    print(f"skipped: GUI tests without RomM ({exc})")
+if window:
+    window.root.withdraw()
+    ui.set_ui(gui.GuiUI(window))
+    window.launcher.auto_setup_retroarch = lambda: True
+    window.start()
+    check("window: first start asks about RomM", set(window.welcome_buttons) == {"romm", "local"})
+    window.welcome_buttons["local"].invoke()
+    check("window: without RomM the library is the ROM folder", pump(lambda: [g.name for g in window.games] == ["Kart"]
+                                                                      and not window.busy))
+    check("window: no Installed chip without RomM", "local" not in window.chips)
+    check("window: the choice is saved", util.load_json(paths.CONFIG_FILE, {}).get("use_romm") is False)
+    check("window: Add game copies into the ROM folder", window.add_button.text.endswith("Add game"))
+    window.root.destroy()
+    window = gui.GuiApp()
+    window.root.withdraw()
+    window.launcher.auto_setup_retroarch = lambda: True
+    window.start()
+    check("window: next start goes straight to the library", pump(lambda: len(window.games) == 1)
+          and not hasattr(window, "welcome_buttons"))
+    ui.set_ui(ui.TerminalUI())
+    window.root.destroy()
+romm.RommClient._check = real_check
+paths.CONFIG_FILE, paths.STATE_FILE, paths.APP_HOME = saved_paths
+
 check("still nothing destructive reached the server", SEEN["destructive"] == 0)
 print("\nall tests passed")

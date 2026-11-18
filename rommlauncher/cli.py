@@ -25,7 +25,8 @@ from .ui import Quit, bold, dim, fail, say
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="romm_launcher.py",
-        description="Play games from your RomM library in RetroArch, with saves synced to RomM.",
+        description="Play games from your RomM library (or a folder on this computer) in RetroArch, "
+                    "with saves synced to RomM.",
     )
     parser.add_argument("game", nargs="*", help="part of a game's name, e.g. zelda")
     parser.add_argument("--list", action="store_true", help="show your library and exit")
@@ -39,10 +40,11 @@ def main(argv: list[str] | None = None) -> int:
                              "Harkinian (soh), Majora's Mask in 2 Ship 2 Harkinian (2ship), Super Mario "
                              "64 in sm64coopdx (sm64coopdx), or any of them in RetroArch")
     parser.add_argument("--add", nargs="+", metavar="FILE", type=Path,
-                        help="add game files you own (your own cartridge dumps, homebrew) to RomM")
+                        help="add game files you own (your own cartridge dumps, homebrew) to RomM, "
+                             "or to the ROM folder without RomM")
     parser.add_argument("--gui", action="store_true", help="open the launcher in a window instead of the terminal")
     parser.add_argument("--setup", action="store_true",
-                        help="change RomM address, login, RetroArch paths and the PC ports")
+                        help="choose RomM or no RomM, change the RomM address and login, RetroArch paths and the PC ports")
     parser.add_argument("--paths", "--backups", action="store_true", dest="paths",
                         help="show where settings, ROMs and save backups are kept")
     args = parser.parse_args(argv)
@@ -57,6 +59,7 @@ def main(argv: list[str] | None = None) -> int:
         source = f"from {paths.HOME_ENV}" if os.environ.get(paths.HOME_ENV) else "the script's folder"
         rows = [
             ("Launcher folder", f"{paths.APP_HOME}  ({source})"),
+            ("RomM", cfg.get("romm_url") or "-" if cfg.get("use_romm", True) else "not used (everything stays here)"),
             ("Settings", paths.CONFIG_FILE),
             ("ROMs", roms_root(cfg)),
             ("Save backups", paths.BACKUP_DIR),
@@ -79,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.setup or app.needs_setup():
             if not args.setup:
-                say("First run: let's connect to your RomM.")
+                say("First run: let's set things up.")
             app.setup()
             if args.setup:
                 return 0
@@ -88,10 +91,13 @@ def main(argv: list[str] | None = None) -> int:
             say(f"First start on {OS_NAMES[system.OS_KEY]} with these settings: where is RetroArch on this computer?")
             app.setup_retroarch()
         app.connect()
-        host = urllib.parse.urlsplit(app.config["romm_url"]).hostname
-        say(dim(f"{'offline' if app.offline else 'connected to ' + str(host)} · {app.config['username']}"))
+        if not app.uses_romm:
+            say(dim(f"without RomM · games in {roms_root(app.config)}"))
+        else:
+            host = urllib.parse.urlsplit(app.config["romm_url"]).hostname
+            say(dim(f"{'offline' if app.offline else 'connected to ' + str(host)} · {app.config['username']}"))
         if args.add:
-            if not app.client:
+            if app.uses_romm and not app.client:
                 fail("Adding games needs a connection to RomM.")
                 return 1
             missing = [f for f in args.add if not f.is_file()]
@@ -113,6 +119,9 @@ def main(argv: list[str] | None = None) -> int:
         if not game:
             return 0
         if args.upload:
+            if not app.uses_romm:
+                app.upload_now(game)  # says why not
+                return 1
             if not app.client:
                 fail("Can't upload while offline.")
                 return 1

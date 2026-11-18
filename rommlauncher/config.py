@@ -80,6 +80,7 @@ OLD_PLATFORM_DEFAULTS = {"3ds": {"save_exts": [], "sync_saves": False}}
 
 def default_config() -> dict:
     return {
+        "use_romm": True,  # False: no RomM at all; the library is the ROM folder, saves stay here
         "romm_url": "",
         "username": "",
         "roms_dir": "roms",  # relative paths are inside APP_HOME
