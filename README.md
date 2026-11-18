@@ -63,7 +63,11 @@ RomM**) and the launcher works on its own:
 - Saves stay where RetroArch (or the PC port) writes them. Nothing is synced, uploaded or
   backed up by the launcher, and `--upload` isn't available.
 - Everything else works the same: cores are downloaded when needed, the PC ports, the
-  DS/3DS screen layouts.
+  DS/3DS screen layouts. The PC ports are offered when the file name says which game it
+  is (e.g. `Legend of Zelda, The - Ocarina of Time (USA).z64`); their saves stay in their
+  own folders.
+- In the window, games show a coloured tile with their name instead of a cover, and
+  there's no description, genre or release year (those come from RomM).
 
 To connect to a RomM server later, run `--setup` (or, in the window, the ☁ button at the
 bottom left). Your saves on this computer are then uploaded the first time you play each
@@ -101,14 +105,15 @@ Opens the launcher as a window, like a game store's library:
   your own cartridges: pick the files, pick the platform (the file type suggests one; the
   list has every platform RomM supports, yours first, with a search field), and the
   launcher uploads them, asks RomM to scan for them, and they appear in your
-  library, already installed on this computer.
+  library, already installed on this computer. Without RomM it copies them into the
+  platform's folder in the ROM folder instead.
 - The bar at the bottom shows what's happening (downloads, save sync, RetroArch running);
   click **Activity** for the full log, which also opens by itself when something fails.
   Questions (like a save that changed in two places) come up as dialogs.
 - The icons on the left: library, **refresh**, **settings** (RetroArch's location, the ROM
   folder, automatic core downloads, the touch pointer, and the PC ports: where each one is,
-  or **Download** to have the launcher install it) and **log out**. On the first
-  start the launcher finds RetroArch by itself.
+  or **Download** to have the launcher install it) and **log out** (without RomM: **☁**,
+  to connect to a RomM server). On the first start the launcher finds RetroArch by itself.
 
 Covers are downloaded from RomM once and kept in `covers/`. The window needs Tkinter, which
 comes with Python on Windows; on Debian/Ubuntu install `python3-tk`. To start it without a
@@ -133,9 +138,12 @@ terminal window on Windows, use `pythonw romm_launcher.py --gui`.
 | `romm_launcher.py --paths` | Show where settings, ROMs and save backups are kept |
 
 **When you're done playing:** press F1 → **Close Content** (this makes RetroArch write the
-save), then quit RetroArch. The launcher waits for RetroArch to close and then uploads the save.
+save), then quit RetroArch. The launcher waits for RetroArch to close and then uploads the save
+(without RomM, the save simply stays on this computer).
 
 ## How saves are synced
+
+(With RomM only. [Without RomM](#without-romm), the launcher leaves saves alone.)
 
 Before a game starts, the launcher compares the save on this computer with the newest one
 in RomM and the one it last synced:
@@ -260,7 +268,8 @@ SoH supports the N64 and GameCube releases (NTSC and PAL, and Master Quest); che
 [ship.equipment](https://ship.equipment).
 
 1. Have Ocarina of Time in your RomM library as an `n64` (or `ngc`) game. If you only have
-   the ROM file: `romm_launcher.py --add "Ocarina of Time.z64"`.
+   the ROM file: `romm_launcher.py --add "Ocarina of Time.z64"` (without RomM, that puts it
+   in `roms/n64/`).
 2. Play it. The launcher asks how:
 
    ```
@@ -401,7 +410,8 @@ your distribution's package) work too: give the path to the `retroarch` program 
 
 The first time you start it on a system that has no section yet, it asks only where
 RetroArch is. You can also just install it separately on each computer; the saves meet in
-RomM either way.
+RomM either way. Without RomM, saves don't travel by themselves: copy RetroArch's saves
+folder (and the PC ports' folders) along with the games.
 
 Set the `ROMM_LAUNCHER_HOME` environment variable to keep the launcher's data in another folder.
 
