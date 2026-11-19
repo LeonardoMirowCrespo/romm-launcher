@@ -251,6 +251,8 @@ def local_rom(roms_dir: Path, path: Path, slug: str) -> dict:
 # ----- for the GUI's library view (no Tk here, so it can be tested) ---------------
 
 ALL_GAMES, LOCAL_GAMES = "all", "local"
+# The two RomM statuses the launcher shows and sets (RomM's others are left to its web UI).
+STATUS_NAMES = {"finished": "Finished", "completed_100": "100%"}
 
 
 def library_filters(games: list[Game], local_ids: set, show_local: bool = True) -> list[tuple[str, str, int]]:

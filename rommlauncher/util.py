@@ -62,6 +62,17 @@ def fmt_time(dt: datetime | None) -> str:
     return dt.astimezone().strftime("%Y-%m-%d %H:%M") if dt else "unknown time"
 
 
+def fmt_duration(seconds: float) -> str:
+    """Play time: '0 min', '42 min', '3 h 5 min', '120 h'."""
+    minutes = int(seconds // 60)
+    hours, minutes = divmod(minutes, 60)
+    if not hours:
+        return f"{minutes} min"
+    if hours >= 100 or not minutes:
+        return f"{hours} h"
+    return f"{hours} h {minutes} min"
+
+
 def write_new_file(dest: Path, body: bytes) -> None:
     """Write via a temporary file, so a half-written core never exists under its real name."""
     dest.parent.mkdir(parents=True, exist_ok=True)

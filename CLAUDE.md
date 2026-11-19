@@ -15,7 +15,8 @@ usernames) belongs in the committed files.
 
 Usage: `romm_launcher.py` (pick from library), `romm_launcher.py zelda` (straight to a match),
 `--list`, `--upload <game>`, `--add <file>...` (add game files to RomM), `--no-launch`, `--screen main|both|corner`,
-`--with soh|2ship|sm64coopdx|retroarch`, `--gui`, `--setup`, `--paths` (alias `--backups`).
+`--with soh|2ship|sm64coopdx|retroarch`, `--status finished|100|none <game>`, `--favorite`/`--unfavorite <game>`,
+`--gui`, `--setup`, `--paths` (alias `--backups`).
 First run asks for setup, starting with "Do you want to connect to a RomM server?".
 
 **Without RomM** (config `use_romm: false`, `Launcher.uses_romm`; default true, so older
@@ -34,7 +35,8 @@ shows `show_welcome` (Connect to RomM / Play without RomM) when there's no confi
 goes straight to the library without RomM, else `show_login` (which has a "No RomM?"
 link → `use_local`); without RomM the rail's ☁ (`connect_romm`) replaces Log out, a
 successful login sets `use_romm` true, and there's no "Installed" chip
-(`library_filters(show_local=False)`).
+(`library_filters(show_local=False)`). Favorites and Finished / 100% are kept in state
+(`favorite`, `status`) instead of RomM.
 
 Flow when a game is picked:
 1. Make sure the ROM is in `<ROM folder>/<platform fs_slug>/<fs_name>` (also accepts the
@@ -47,6 +49,22 @@ Flow when a game is picked:
 4. If the local save changed, upload it to RomM. A failed upload is marked `pending_upload`
    in state and retried at the next start.
 
+**Play time, Finished / 100%, favorites** (2026-11-19, at the user's request; they wanted
+only total play time, not per machine, and of RomM's statuses only Finished and 100%).
+`play` times the game with `time.monotonic()` from start to exit (`finally`, so also when
+the player stops waiting) and adds it to `play_seconds` in state (`add_play_time`,
+`play_time`; `fmt_duration` prints it). RomM has no play-time field, so it stays local.
+Status and favorites are RomM's own: `Launcher.status` reads `rom_user.status` from the
+library item (only `STATUS_NAMES` count; RomM's other statuses show as none), favorites
+are RomM's collection marked `is_favorite` owned by the user (`RommClient.favorites`, read
+with the library into `Launcher.favorites` and cached in `library.json` as `favorites`).
+`set_status`/`set_favorite` need the connection (`can_mark`; offline they fail) and update
+`library.json`. GUI: a ★ rail icon opens the Favorites page (`GuiApp.view`, `show_view`,
+`view_games`; chips and search work on it), the details panel has "Your progress"
+(`_marks`: ☆ Favorite, Finished, 100%, click the chosen one again to clear;
+`mark_chips` for tests) and a "Played" row; tiles get a ★ tag and "✓ Finished". Terminal:
+the picker lists Favorites after Continue playing and `game_marks` per row.
+
 ## Constraints
 
 - **Standard library only.** No pip dependencies. `keyring` is optional
@@ -55,8 +73,10 @@ Flow when a game is picked:
   available, otherwise it's asked with `getpass` each run and kept in memory only.
 - **Never lose a save.** Anything that overwrites a save backs it up first. A failed upload
   must be loud and leave the local save untouched.
-- **Never delete or change anything on RomM.** The launcher only reads, uploads saves, and
-  (since 2026-11-16, at the user's request) adds new ROM files.
+- **Never delete or change anything on RomM.** The launcher only reads, uploads saves,
+  (since 2026-11-16, at the user's request) adds new ROM files, and (since 2026-11-19, at
+  the user's request) sets a game's Finished / 100% status and adds or removes a game in
+  the user's Favorites collection.
   `RommClient._check` enforces it on every request: GET only to the RomM server, writes only
   as listed in `RommClient.ALLOWED_WRITES` (method, path pattern, query parameters, body
   check): POST `/api/saves` with `rom_id`/`emulator`, POST `/api/token`, the chunked ROM
@@ -65,7 +85,14 @@ Flow when a game is picked:
   without a body), POST `/api/tasks/scan` only as `{"type": "quick", "platforms": [ids]}`,
   and POST `/api/platforms` only as `{"fs_slug": "<plain slug>"}` (creates a platform the
   user picked that isn't on their RomM yet; RomM makes the folder and entry).
-  Never DELETE/PATCH; redirects to other servers are refused. Don't widen that list without
+  Since 2026-11-19, at the user's request (favorites and Finished / 100% synced with
+  RomM's own): PUT `/api/roms/<id>/props` only as `{"status": "finished"|"completed_100"|null}`
+  (RomM applies only the fields sent, `exclude_unset`); POST `/api/collections?is_favorite=true`
+  (+ optional `is_public=false`) with a multipart body of only `name=Favorites` (what RomM's
+  web UI makes when there's none); POST and DELETE `/api/collections/<id>/roms` with
+  `{"rom_ids": [one int]}`, and only for the id `favorites()` found (`client.favorites_id`;
+  paths with `(?P<fav>…)` check it). That DELETE (out of the collection) is the only one;
+  never PATCH; redirects to other servers are refused. Don't widen that list without
   a very good reason. An upload replaces
   RomM's save of the same name, so `Launcher.backup_romm_copy` downloads and backs up
   that save first (`romm-before-upload`); if that fails, nothing is uploaded.
@@ -82,16 +109,16 @@ downwards in this list (no import cycles; type-only imports use `TYPE_CHECKING`)
 | `system.py` | `APP_NAME`, `IS_WINDOWS`, `OS_KEY`/`OS_KEYS`/`OS_NAMES`, `CORE_EXT(S)`, optional `keyring` (`HAVE_KEYRING`) |
 | `paths.py` | `APP_HOME` and the data files (`CONFIG_FILE`, `STATE_FILE`, `LIBRARY_CACHE`, `BACKUP_DIR`, `COVER_DIR`), `OLD_LOCATIONS` |
 | `ui.py` | `TerminalUI`, `set_ui`, `say/ok/warn/fail`, `ask`, `ask_yes`, `choose`, `progress_bar`, `Progress`, `Quit`, colours, `human_size` |
-| `util.py` | `load_json`, `save_json`, `sha256`, `file_hash`, `parse_time`, `fmt_time`, `write_new_file` |
+| `util.py` | `load_json`, `save_json`, `sha256`, `file_hash`, `parse_time`, `fmt_time`, `fmt_duration`, `write_new_file` |
 | `retroarch.py` | Flatpak/Steam/default RetroArch, `read_retroarch_cfg`, `core_id`, `find_core`, `installed_cores`, `core_display_name`, `core_save_folder`, `KNOWN_CORE_FOLDERS`, core options (`retroarch_config_dir`, `core_options_file`, `set_core_options`) |
 | `config.py` | `DEFAULT_PLATFORMS`, `MACHINE_KEYS`, `default_config`, `load_config`, `config_for_disk`, `guess_os`, `roms_root`, `migrate_flat_config`, `migrate_legacy_dirs` |
 | `dualscreen.py` | `SCREEN_CHOICES`, `SCREEN_LAYOUTS`, `TOUCH_CONTROLS`, `screen_choices(game)` |
 | `core_downloads.py` | buildbot: `install_core`, `install_core_info`, `core_download_url`, `http_download`, `CoreInstallError` |
-| `romm.py` | `RommClient` (+ safety lock `_check`, `ALLOWED_WRITES`; `upload_rom`, `start_scan`, `wait_for_task`, `list_platforms`), `RommError`, `LoginError` |
+| `romm.py` | `RommClient` (+ safety lock `_check`, `ALLOWED_WRITES`; `upload_rom`, `start_scan`, `wait_for_task`, `list_platforms`, `set_status`, `favorites`, `set_favorite`), `STATUSES`, `RommError`, `LoginError` |
 | `saves.py` | `FileSave`, `FolderSave`, 3DS title ID helpers, `backup_bytes`/`backup_file`, `RemoteSave`, `fetch_remote`, `decide` |
 | `ports.py` | PC ports: `Port` (`plays`, `archive_for`, `program`, `installed`, `data_dir`, `saves_dir`, `launch`, `cleanup`, `save`, `find`; download: `install_dir`, `latest_release`, `install`), `SHIP_OF_HARKINIAN`, `TWO_SHIP`, `COOP_DX`, `PORTS`, `port_for`, `player_choices`, `PortSave`, `unpacked_rom`, `place_rom`/`big_endian_n64`/`RomMismatch`, `PortInstallError`, `GITHUB_API`/`GITHUB`, `SOH`/`TWOSHIP`/`SM64COOPDX`/`RETROARCH`/`PLAYERS` |
-| `games.py` | `Game`, `index_roms`, `unpack_zip`, `filter_games`, without RomM `local_roms`/`game_entries`/`PLATFORM_NAMES`/`platform_name`, GUI library helpers (`library_filters`, `filter_library`, `local_game_ids`), `fetch_cover`, `ROM_PLATFORMS`/`guess_platform`, `game_facts` |
-| `launcher.py` | `Launcher` (`uses_romm`/`use_romm`, setup, `setup_romm`, login, library, picker, `play`, `upload`, `retry_pending`, `add_rom`, `add_local_rom`, ...) |
+| `games.py` | `Game`, `STATUS_NAMES`, `index_roms`, `unpack_zip`, `filter_games`, without RomM `local_roms`/`game_entries`/`PLATFORM_NAMES`/`platform_name`, GUI library helpers (`library_filters`, `filter_library`, `local_game_ids`), `fetch_cover`, `ROM_PLATFORMS`/`guess_platform`, `game_facts` |
+| `launcher.py` | `Launcher` (`uses_romm`/`use_romm`, setup, `setup_romm`, login, library, picker, `play`, `upload`, `retry_pending`, `add_rom`, `add_local_rom`, `play_time`, `status`/`set_status`, `is_favorite`/`set_favorite`, ...) |
 | `gui.py` | `GuiUI`, `GuiProgress`, `GuiApp`, `run_gui` |
 | `cli.py` | `main()` (argparse; `--gui` goes to `run_gui`) |
 
@@ -312,8 +339,9 @@ romm-launcher/
   romm_launcher.py, rommlauncher/, tests/, README.md, CLAUDE.md, LICENSE, .gitignore   the code (in git)
   CLAUDE.local.md  notes about your own setup (git-ignored)
   config.json      use_romm, RomM URL, username, ROM folder, platform cores; RetroArch paths per system (mode 600)
-  state.json       per RomM ROM id: last synced hash/time, last_played, pending_upload
-  library.json     cached library, for offline play
+  state.json       per RomM ROM id: last synced hash/time, last_played, play_seconds, pending_upload
+                   (without RomM also status, favorite)
+  library.json     cached library (+ favorites ids), for offline play
   backups/<rom_id>/  last 20 replaced saves (3DS saves as .zip)
   roms/<platform>/   downloaded ROMs (cache; RomM has the real copies)
   covers/          cover art for the GUI, <rom id>.png (cache)
@@ -374,6 +402,15 @@ when something fails.
   `{"fs_slug": …}` creates one (folder + entry, 201 with the platform). The add-game
   question lists all of them (`Launcher.add_rom`); long choices are searched (`ui.filter_options`,
   `TerminalUI._choose_by_search`, `GuiApp.ask_from_list`).
+- Status and favorites (RomM 5.4.1, `backend/endpoints/roms/__init__.py` `update_rom_user`,
+  `collections.py`, web UI `useFavoriteToggle.ts`): each item of `GET /api/roms` has
+  `rom_user` (`status`: incomplete/finished/completed_100/retired/never_playing or null;
+  also `backlogged`, `now_playing`, `rating`, ... which the launcher leaves alone). `PUT
+  /api/roms/{id}/props` with JSON sets only the fields given (scope `roms.user.write`).
+  Favorites: `GET /api/collections` (each with `is_favorite`, `rom_ids`, `owner_username`);
+  the web UI creates `POST /api/collections?is_favorite=true&is_public=false` with form
+  `name=Favorites` when missing; `POST`/`DELETE /api/collections/{id}/roms`
+  `{"rom_ids": [...]}` add/remove (scope `collections.write`).
 - `GET /api/saves/{id}/content` downloads the raw file. Fallback: the save's
   `download_path`. (Newer RomM can convert saves between cores via a `core` query param.
   Not used yet.)

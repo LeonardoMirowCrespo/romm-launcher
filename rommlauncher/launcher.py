@@ -10,6 +10,7 @@ import getpass
 import re
 import shutil
 import subprocess
+import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,7 +21,16 @@ from . import system
 from .config import config_for_disk, load_config, roms_root
 from .core_downloads import CoreInstallError, core_info_dir, install_core, install_core_info
 from .dualscreen import SCREEN_CHOICES, SCREEN_LAYOUTS, TOUCH_CONTROLS
-from .games import Game, filter_games, guess_platform, index_roms, local_roms, platform_name, unpack_zip
+from .games import (
+    STATUS_NAMES,
+    Game,
+    filter_games,
+    guess_platform,
+    index_roms,
+    local_roms,
+    platform_name,
+    unpack_zip,
+)
 from .ports import (
     PLAYERS,
     PORTS,
@@ -67,7 +77,7 @@ from .ui import (
     say,
     warn,
 )
-from .util import fmt_time, load_json, save_json
+from .util import fmt_duration, fmt_time, load_json, save_json
 
 if TYPE_CHECKING:
     from .ports import PortSave
@@ -82,6 +92,7 @@ class Launcher:
         self.state = load_json(paths.STATE_FILE, {})
         self.client: RommClient | None = None
         self.offline = False
+        self.favorites: set = set()  # with RomM: the ids in its Favorites collection
 
     # ----- setup and login --------------------------------------------
 
@@ -381,12 +392,20 @@ class Launcher:
     def library(self) -> list[Game]:
         if not self.uses_romm:  # the games in the ROM folder
             return [Game(r, self.config) for r in local_roms(roms_root(self.config), self.config)]
+        cache = load_json(paths.LIBRARY_CACHE, {"roms": [], "favorites": []})
         if self.client:
             say(dim("Loading your library…"))
             roms = self.client.list_roms()
-            save_json(paths.LIBRARY_CACHE, {"roms": roms, "fetched_at": datetime.now().isoformat()})
+            try:
+                self.favorites = self.client.favorites()
+            except RommError as exc:
+                warn(f"Couldn't read your favorites from RomM ({exc}).")
+                self.favorites = set(cache.get("favorites") or [])
+            save_json(paths.LIBRARY_CACHE, {"roms": roms, "favorites": sorted(self.favorites),
+                                            "fetched_at": datetime.now().isoformat()})
         else:
-            roms = load_json(paths.LIBRARY_CACHE, {"roms": []})["roms"]
+            roms = cache["roms"]
+            self.favorites = set(cache.get("favorites") or [])
         games = [Game(r, self.config) for r in roms if r.get("fs_name")]
         if self.offline:
             index = index_roms(roms_root(self.config))
@@ -396,25 +415,123 @@ class Launcher:
     def last_played(self, game: Game) -> str:
         return self.state.get(str(game.id), {}).get("last_played", "")
 
+    # ----- play time, Finished / 100% and favorites ------------------------
+
+    def play_time(self, game: Game) -> int:
+        """Seconds played in total (through the launcher, on this launcher folder)."""
+        return int(self.state.get(str(game.id), {}).get("play_seconds", 0))
+
+    def add_play_time(self, game: Game, seconds: float) -> None:
+        entry = self.state.setdefault(str(game.id), {})
+        entry["play_seconds"] = int(entry.get("play_seconds", 0) + max(0, seconds))
+        save_json(paths.STATE_FILE, self.state)
+
+    def status(self, game: Game) -> str | None:
+        """"finished", "completed_100" or None. With RomM it's RomM's own status for the
+        game (RomM's other statuses count as none here); without RomM it's in state."""
+        if self.uses_romm:
+            value = (game.rom.get("rom_user") or {}).get("status")
+        else:
+            value = self.state.get(str(game.id), {}).get("status")
+        return value if value in STATUS_NAMES else None
+
+    def is_favorite(self, game: Game) -> bool:
+        if self.uses_romm:
+            return game.id in self.favorites
+        return bool(self.state.get(str(game.id), {}).get("favorite"))
+
+    def can_mark(self) -> bool:
+        """Whether status and favorites can be changed now (with RomM: only while connected)."""
+        return not self.uses_romm or self.client is not None
+
+    def _needs_connection(self) -> bool:
+        if self.can_mark():
+            return False
+        fail("Offline: marking games needs a connection to RomM.")
+        return True
+
+    def _update_cache(self, game: Game | None = None) -> None:
+        """Keep library.json in step with a change, for the next offline start."""
+        if not paths.LIBRARY_CACHE.exists():
+            return
+        cache = load_json(paths.LIBRARY_CACHE, {"roms": []})
+        if game is not None:
+            cache["roms"] = [game.rom if r.get("id") == game.id else r for r in cache.get("roms", [])]
+        cache["favorites"] = sorted(self.favorites)
+        save_json(paths.LIBRARY_CACHE, cache)
+
+    def set_status(self, game: Game, status: str | None) -> bool:
+        """Mark a game Finished ("finished") or 100% ("completed_100"), or neither (None).
+        With RomM it's RomM's status for the game, so its web UI shows it too."""
+        if status not in (*STATUS_NAMES, None):
+            raise ValueError(f"Unknown status {status!r}")
+        if self._needs_connection():
+            return False
+        if self.uses_romm:
+            self.client.set_status(game.id, status)
+            game.rom["rom_user"] = {**(game.rom.get("rom_user") or {}), "status": status}
+            self._update_cache(game)
+        else:
+            entry = self.state.setdefault(str(game.id), {})
+            if status:
+                entry["status"] = status
+            else:
+                entry.pop("status", None)
+            save_json(paths.STATE_FILE, self.state)
+        ok(f"{game.name}: {STATUS_NAMES[status]}." if status else f"{game.name}: no longer marked Finished / 100%.")
+        return True
+
+    def set_favorite(self, game: Game, on: bool) -> bool:
+        """Add a game to the favorites or take it out. With RomM that's the Favorites
+        collection RomM's web UI uses (made if there's none yet)."""
+        if self._needs_connection():
+            return False
+        if self.uses_romm:
+            self.favorites = self.client.set_favorite(game.id, on)
+            self._update_cache()
+        else:
+            entry = self.state.setdefault(str(game.id), {})
+            if on:
+                entry["favorite"] = True
+            else:
+                entry.pop("favorite", None)
+            save_json(paths.STATE_FILE, self.state)
+        ok(f"{game.name}: {'added to' if on else 'taken out of'} your favorites.")
+        return True
+
+    def game_marks(self, game: Game) -> str:
+        """'★  ✓ Finished  12 h 5 min' for the terminal's list."""
+        status = self.status(game)
+        seconds = self.play_time(game)
+        marks = ["★" if self.is_favorite(game) else "",
+                 f"✓ {STATUS_NAMES[status]}" if status else "",
+                 fmt_duration(seconds) if seconds >= 60 else ""]
+        return "  ".join(m for m in marks if m)
+
     def print_games(self, games: list[Game], numbered: list[Game]) -> None:
         index = index_roms(roms_root(self.config))
         width = min(max((len(g.name) for g in games), default=20), 52)
 
         def row(g: Game) -> None:
             numbered.append(g)
-            here = green("● on this computer") if g.find_local_rom(index) else dim("○ will download")
+            here = green("● on this computer   ") if g.find_local_rom(index) else dim("○ will download     ")
             name = g.name if len(g.name) <= width else g.name[: width - 1] + "…"
-            say(f"{len(numbered):>4}  {name:<{width}}  {here}")
+            say(f"{len(numbered):>4}  {name:<{width}}  {here}{dim(self.game_marks(g))}".rstrip())
 
-        recent = sorted((g for g in games if self.last_played(g)), key=self.last_played, reverse=True)[:3]
-        if recent and len(games) > 5:
-            print()
-            say(bold("Continue playing"))
-            for g in recent:
-                row(g)
+        recent, favorites = [], []
+        if len(games) > 5:  # short lists are shown whole, by platform
+            recent = sorted((g for g in games if self.last_played(g)), key=self.last_played, reverse=True)[:3]
+            favorites = sorted((g for g in games if self.is_favorite(g) and g not in recent),
+                               key=lambda g: g.name.lower())
+        for title, group in (("Continue playing", recent), ("Favorites", favorites)):
+            if group:
+                print()
+                say(bold(title))
+                for g in group:
+                    row(g)
         by_platform: dict[str, list[Game]] = {}
         for g in games:
-            if g not in recent or len(games) <= 5:
+            if g not in recent and g not in favorites:
                 by_platform.setdefault(g.platform_name, []).append(g)
         for platform in sorted(by_platform):
             print()
@@ -790,7 +907,13 @@ class Launcher:
         except OSError as exc:
             fail(f"Could not start {name}: {exc}")
             return
-        self.wait_for(proc, name)
+        started = time.monotonic()
+        try:
+            self.wait_for(proc, name)
+        finally:  # also when the player stops waiting: count the time until then
+            session = time.monotonic() - started
+            self.add_play_time(game, session)
+        say(f"Played {fmt_duration(session)} · {fmt_duration(self.play_time(game))} in total.")
         if port:
             port.cleanup(self.config)
 

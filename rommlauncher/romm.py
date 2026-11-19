@@ -1,8 +1,10 @@
 """The RomM server's REST API.
 
 Safety: RommClient checks every request before it's sent (`_check`). It may only read
-from the RomM server, upload saves, and add new ROM files (never replacing one): no
-DELETE/PATCH, no other POSTs or PUTs, no other servers. See ALLOWED_WRITES.
+from the RomM server, upload saves, add new ROM files (never replacing one), mark a game
+Finished / 100% (its status only) and add or remove a game in the player's own Favorites
+collection: no PATCH, no other POSTs, PUTs or DELETEs, no other servers. See
+ALLOWED_WRITES.
 """
 
 from __future__ import annotations
@@ -77,6 +79,35 @@ def _no_body(body) -> bool:
     return not body
 
 
+STATUSES = ("finished", "completed_100")  # the RomM statuses the launcher sets (or clears)
+FAVORITES_NAME = "Favorites"  # what RomM's web UI calls the collection it makes for favourites
+
+
+def _status_only(body) -> bool:
+    """A game's own status, Finished / 100% or none; nothing else about it (rating,
+    completion, hidden, ...) and no other status."""
+    value = _json_body(body)
+    return value is not None and set(value) == {"status"} and value["status"] in (*STATUSES, None)
+
+
+def _one_rom_only(body) -> bool:
+    """One game to add to or take out of a collection."""
+    value = _json_body(body)
+    return (value is not None and set(value) == {"rom_ids"} and isinstance(value["rom_ids"], list)
+            and len(value["rom_ids"]) == 1 and type(value["rom_ids"][0]) is int)
+
+
+def _favorites_form(boundary: str) -> bytes:
+    return (f'--{boundary}\r\nContent-Disposition: form-data; name="name"\r\n\r\n'
+            f"{FAVORITES_NAME}\r\n--{boundary}--\r\n").encode()
+
+
+def _favorites_only(body) -> bool:
+    """A new collection that's only a name: the one RomM's web UI makes for favourites."""
+    match = re.match(rb"--([0-9a-f]{32})\r\n", body or b"")
+    return match is not None and body == _favorites_form(match[1].decode())
+
+
 def _new_platform_only(body) -> bool:
     """Creating a platform: only its folder name, a plain slug (RomM makes the folder and
     the platform's entry; an existing platform's folder is left as it is)."""
@@ -86,14 +117,19 @@ def _new_platform_only(body) -> bool:
 
 
 class RommClient:
-    TOKEN_SCOPES = "me.read roms.read platforms.read assets.read assets.write"
+    TOKEN_SCOPES = ("me.read roms.read platforms.read assets.read assets.write roms.user.write "
+                    "collections.read collections.write")
     ADD_ROM_SCOPES = TOKEN_SCOPES + " roms.write tasks.run platforms.write"
-    # The launcher may only READ from RomM, UPLOAD saves and ADD new ROM files. Every
-    # request is checked against this before it's sent (see _check), so nothing in the
-    # launcher can delete or change anything else on the server: no DELETE/PATCH, and
-    # POST/PUT only to these paths, with only these query parameters (so e.g. RomM's
-    # "autocleanup" option for save uploads, which deletes older saves, can't be switched
-    # on), and only with a body the check accepts (None: any body).
+    # The launcher may only READ from RomM, UPLOAD saves, ADD new ROM files, set a game's
+    # status (Finished / 100% / none) and add or take out one game in the player's
+    # Favorites collection. Every request is checked against this before it's sent (see
+    # _check), so nothing in the launcher can delete or change anything else on the
+    # server: no PATCH, and POST/PUT/DELETE only to these paths, with only these query
+    # parameters (so e.g. RomM's "autocleanup" option for save uploads, which deletes older
+    # saves, can't be switched on; a dict also fixes their values), and only with a body
+    # the check accepts (None: any body). A path with (?P<fav>...) must be the Favorites
+    # collection that favorites() found. That's the only DELETE: it takes a game out of
+    # that collection and leaves the game itself alone.
     #   (method, path pattern, allowed query parameters, body check)
     ALLOWED_WRITES = [
         ("POST", r"/api/saves", {"rom_id", "emulator"}, None),
@@ -103,6 +139,11 @@ class RommClient:
         ("POST", rf"/api/roms/upload/{UPLOAD_ID}/(complete|cancel)", set(), _no_body),
         ("POST", r"/api/tasks/scan", set(), _quick_scan_only),
         ("POST", r"/api/platforms", set(), _new_platform_only),  # a new platform to add a game to
+        ("PUT", r"/api/roms/\d+/props", set(), _status_only),  # Finished / 100% / none
+        # the Favorites collection, only when the player has none yet (as RomM's web UI does)
+        ("POST", r"/api/collections", {"is_favorite": {"true"}, "is_public": {"false"}}, _favorites_only),
+        ("POST", r"/api/collections/(?P<fav>\d+)/roms", set(), _one_rom_only),
+        ("DELETE", r"/api/collections/(?P<fav>\d+)/roms", set(), _one_rom_only),
     ]
 
     def __init__(self, base_url: str, username: str, password: str, timeout: int = 30):
@@ -112,6 +153,7 @@ class RommClient:
         self.auth = f"Basic {token}"
         self.timeout = timeout
         self._opener = urllib.request.build_opener(_SameServerRedirects(_origin(self.base)))
+        self.favorites_id: int | None = None  # the player's Favorites collection, once favorites() found it
 
     def _url(self, path: str, params: dict | None) -> str:
         url = path if path.startswith("http") else f"{self.base}{path}"
@@ -128,14 +170,22 @@ class RommClient:
         parts = urllib.parse.urlsplit(url)
         prefix = urllib.parse.urlsplit(self.base).path.rstrip("/")
         path = parts.path[len(prefix):] if parts.path.startswith(prefix) else parts.path
-        params = set(urllib.parse.parse_qs(parts.query, keep_blank_values=True))
+        query = urllib.parse.parse_qs(parts.query, keep_blank_values=True)
         for allowed_method, pattern, allowed_params, body_ok in self.ALLOWED_WRITES:
-            if (method == allowed_method and re.fullmatch(pattern, path) and params <= allowed_params
-                    and (body_ok is None or body_ok(body))):
+            match = re.fullmatch(pattern, path) if method == allowed_method else None
+            if not match or not set(query) <= set(allowed_params):
+                continue
+            if isinstance(allowed_params, dict) and not all(
+                    set(values) <= allowed_params[name] for name, values in query.items()):
+                continue
+            if "fav" in match.groupdict() and (self.favorites_id is None or int(match["fav"]) != self.favorites_id):
+                continue
+            if body_ok is None or body_ok(body):
                 return
         raise RommError(
             f"Blocked: {method} {path}{'?' + parts.query if parts.query else ''}. The launcher is only "
-            "allowed to read from RomM, upload saves and add new ROM files."
+            "allowed to read from RomM, upload saves, add new ROM files, mark games Finished / 100% "
+            "and change your Favorites."
         )
 
     def _open(self, method, path, params=None, body=None, content_type=None, retry=True, headers=None,
@@ -286,6 +336,51 @@ class RommClient:
             content_type=f"multipart/form-data; boundary={boundary}",
         )
         return result if isinstance(result, dict) else {}
+
+    # ----- status and favourites ------------------------------------------
+
+    def set_status(self, rom_id: int, status: str | None) -> None:
+        """Mark a game Finished ("finished") or 100% ("completed_100") on RomM, or clear
+        its status (None). Only the status changes; RomM keeps the rest (rating, ...)."""
+        if status not in (*STATUSES, None):
+            raise ValueError(f"Unknown status {status!r}")
+        self._request("PUT", f"/api/roms/{int(rom_id)}/props", body=json.dumps({"status": status}).encode(),
+                      content_type="application/json")
+
+    def favorites(self) -> set[int]:
+        """The ids of the games in the player's Favorites collection (RomM's web UI keeps
+        favourites as a collection marked is_favorite); empty if there's none yet."""
+        collections = self._json("GET", "/api/collections")
+        mine = [c for c in collections if isinstance(c, dict) and c.get("is_favorite")
+                and isinstance(c.get("id"), int)
+                and str(c.get("owner_username") or self.username).lower() == self.username.lower()
+                ] if isinstance(collections, list) else []
+        if not mine:
+            self.favorites_id = None
+            return set()
+        favorites = min(mine, key=lambda c: c["id"])
+        self.favorites_id = favorites["id"]
+        return {i for i in favorites.get("rom_ids") or [] if type(i) is int}
+
+    def set_favorite(self, rom_id: int, on: bool) -> set[int]:
+        """Add a game to the Favorites collection (made first if there's none yet) or take
+        it out. Returns the ids now in it."""
+        self.favorites()
+        if self.favorites_id is None:
+            if not on:
+                return set()
+            boundary = uuid.uuid4().hex
+            made = self._json("POST", "/api/collections", params={"is_favorite": "true", "is_public": "false"},
+                              body=_favorites_form(boundary), content_type=f"multipart/form-data; boundary={boundary}")
+            if not isinstance(made, dict) or type(made.get("id")) is not int:
+                raise RommError(f"RomM didn't make the Favorites collection (it answered {made!r}).")
+            self.favorites_id = made["id"]
+        result = self._json("POST" if on else "DELETE", f"/api/collections/{self.favorites_id}/roms",
+                            body=json.dumps({"rom_ids": [int(rom_id)]}).encode(), content_type="application/json")
+        ids = result.get("rom_ids") if isinstance(result, dict) else None
+        if not isinstance(ids, list):
+            return self.favorites()
+        return {i for i in ids if type(i) is int}
 
     # ----- adding games ---------------------------------------------------
 

@@ -68,6 +68,8 @@ RomM**) and the launcher works on its own:
   own folders.
 - In the window, games show a coloured tile with their name instead of a cover, and
   there's no description, genre or release year (those come from RomM).
+- Favorites and Finished / 100% are kept on this computer (in `state.json`) instead of in
+  RomM.
 
 To connect to a RomM server later, run `--setup` (or, in the window, the ☁ button at the
 bottom left). Your saves on this computer are then uploaded the first time you play each
@@ -110,7 +112,15 @@ Opens the launcher as a window, like a game store's library:
 - The bar at the bottom shows what's happening (downloads, save sync, RetroArch running);
   click **Activity** for the full log, which also opens by itself when something fails.
   Questions (like a save that changed in two places) come up as dialogs.
-- The icons on the left: library, **refresh**, **settings** (RetroArch's location, the ROM
+- **Your progress** in the details: **☆ Favorite**, **Finished** and **100%** (click the
+  chosen one again to clear it). They're RomM's own favorites and status, so RomM's web
+  page shows the same (the launcher only uses Finished and 100% of RomM's statuses; a game
+  you marked otherwise there shows as neither). Changing them needs the connection to
+  RomM. Finished games say so under their cover, and favorites have a ★ in its corner.
+- **Played**: how long you've played the game through the launcher, in total (counted
+  from the moment RetroArch or the PC port starts until it closes).
+- The icons on the left: library, **★ favorites** (only your favorite games, with the same
+  search and chips), **refresh**, **settings** (RetroArch's location, the ROM
   folder, automatic core downloads, the touch pointer, and the PC ports: where each one is,
   or **Download** to have the launcher install it) and **log out** (without RomM: **☁**,
   to connect to a RomM server). On the first start the launcher finds RetroArch by itself.
@@ -134,12 +144,18 @@ terminal window on Windows, use `pythonw romm_launcher.py --gui`.
 | `romm_launcher.py --with soh ocarina` | Ocarina of Time: play it in Ship of Harkinian (`soh`) or RetroArch (`retroarch`) without asking |
 | `romm_launcher.py --with 2ship majora` | Majora's Mask: play it in 2 Ship 2 Harkinian (`2ship`) or RetroArch without asking |
 | `romm_launcher.py --with sm64coopdx mario 64` | Super Mario 64: play it in sm64coopdx (`sm64coopdx`) or RetroArch without asking |
+| `romm_launcher.py --status finished zelda` | Mark a game Finished (`finished`), 100% (`100`) or neither (`none`) instead of playing it |
+| `romm_launcher.py --favorite zelda` | Add a game to your favorites (`--unfavorite` takes it out) |
 | `romm_launcher.py --setup` | Choose RomM or no RomM; change the RomM address, login, RetroArch paths or the PC ports |
 | `romm_launcher.py --paths` | Show where settings, ROMs and save backups are kept |
 
 **When you're done playing:** press F1 → **Close Content** (this makes RetroArch write the
 save), then quit RetroArch. The launcher waits for RetroArch to close and then uploads the save
-(without RomM, the save simply stays on this computer).
+(without RomM, the save simply stays on this computer). It also says how long you played,
+and adds it to the game's total.
+
+The list of games starts with the ones you played last and your favorites (★), and says
+which ones you've finished and how long you've played each.
 
 ## How saves are synced
 
@@ -161,9 +177,14 @@ retried the next time you start the launcher.
 
 ## What it does on your RomM server
 
-Reading, uploading saves, and adding new games when you ask it to. It can't delete or
-change anything else: every request is checked before it's sent, and anything else
-(deleting, editing, other servers) is refused. A new game is only ever added as a new file
+Reading, uploading saves, adding new games when you ask it to, and your favorites and
+Finished / 100% marks. It can't delete or change anything else: every request is checked
+before it's sent, and anything else (deleting, editing, other servers) is refused. A mark
+changes only that game's status in RomM (not its rating or anything else; clearing it
+sets no status). Favorites are the "Favorites" collection RomM's web page uses: the
+launcher makes it the first time if you don't have one (private, like RomM does), and
+adds or takes out one game at a time; taking a game out of it leaves the game itself
+alone, and no other collection is touched. A new game is only ever added as a new file
 in a platform's folder (RomM refuses a name that's already there, and the launcher never
 asks it to overwrite), followed by a "quick" scan of that platform, which only picks up
 files RomM hasn't seen yet. If you add a game for a platform your RomM doesn't have yet,
@@ -377,7 +398,7 @@ romm-launcher/
   romm_launcher.py   start the launcher with this
   rommlauncher/      the launcher's code
   config.json     settings (RomM or not, RomM address, username, RetroArch paths, cores)
-  state.json      what was last synced, per game
+  state.json      per game: what was last synced, when you last played and for how long
   library.json    your library, cached for offline play
   backups/        replaced saves
   roms/           downloaded games (RomM has the real copies); without RomM, your games
@@ -413,6 +434,11 @@ RetroArch is. You can also just install it separately on each computer; the save
 RomM either way. Without RomM, saves don't travel by themselves: copy RetroArch's saves
 folder (and the PC ports' folders) along with the games.
 
+Play time is counted in `state.json`, so it's the total for this launcher folder: copy
+the folder along and it keeps adding up; with a separate copy on each computer, each
+counts its own (RomM has no place for play time). Favorites and Finished / 100% are in
+RomM, so every computer shows the same.
+
 Set the `ROMM_LAUNCHER_HOME` environment variable to keep the launcher's data in another folder.
 
 ## Known limits
@@ -446,7 +472,7 @@ one file per topic:
 | `config.py` | `config.json`: defaults, per-system sections, moving old settings |
 | `dualscreen.py` | DS/3DS screen layouts and touch-screen controls |
 | `core_downloads.py` | Downloading missing cores from libretro |
-| `romm.py` | The RomM API, with its safety lock (reads, save uploads, new ROMs only) |
+| `romm.py` | The RomM API, with its safety lock (reads, save uploads, new ROMs, Finished / 100% and Favorites only) |
 | `saves.py` | Save files, 3DS save folders, backups, deciding which save is newer |
 | `ports.py` | PC ports that play a game instead of RetroArch: Ship of Harkinian, 2 Ship 2 Harkinian, sm64coopdx |
 | `games.py` | A game from the library: ROM and save locations, search, covers, facts |
