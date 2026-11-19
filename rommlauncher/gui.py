@@ -28,6 +28,7 @@ from .games import (
     ALL_GAMES,
     LOCAL_GAMES,
     ROM_PLATFORMS,
+    STATUS_NAMES,
     cover_file,
     fetch_cover,
     filter_library,
@@ -49,6 +50,7 @@ from .retroarch import FLATPAK_RETROARCH, core_id, retroarch_command, retroarch_
 from .romm import LoginError, RommClient, RommError
 from .system import APP_NAME, HAVE_KEYRING, IS_WINDOWS, KEYRING_SERVICE, keyring
 from .ui import Quit, TerminalUI, fail, filter_options, human_size, set_ui
+from .util import fmt_duration
 
 if TYPE_CHECKING:
     from .games import Game
@@ -86,6 +88,7 @@ PLATFORM_SHORT = {  # RomM's fs_slug → the short name on chips and cover tags
     "wii": "Wii", "psx": "PS1", "ps2": "PS2", "psp": "PSP", "genesis": "Genesis", "megadrive": "Mega Drive",
 }
 LAYOUT_SHORT = {"main": "Main", "both": "Both", "corner": "Corner"}
+VIEWS = {"library": "Library", "favorites": "Favorites"}  # the rail's pages of games (GuiApp.view)
 PLAYER_TIPS = {**{p.key: f"{p.name}: {p.tip}" for p in PORTS.values()},
                RETROARCH: "RetroArch: the original game, in an emulator"}
 
@@ -183,6 +186,7 @@ class GuiApp:
         self.games: list[Game] = []
         self.local_ids: set[int] = set()
         self.filter_key = ALL_GAMES
+        self.view = "library"  # or "favorites": only those (the rail's ★)
         self.selected: Game | None = None
         self.busy = False
         self.covers: dict[int, "tk.PhotoImage"] = {}       # full size, as downloaded
@@ -522,7 +526,8 @@ class GuiApp:
         center.pack(side="left", fill="both", expand=True)
         head = tk.Frame(center, bg=THEME["bg"])
         head.pack(fill="x", padx=(self.S(30), self.S(26)), pady=(self.S(24), 0))
-        self.label(head, "Library", 22, "bold").pack(side="left")
+        self.title_label = self.label(head, VIEWS[self.view], 22, "bold")
+        self.title_label.pack(side="left")
         self.heading = self.label(head, "", 10, fg=THEME["muted"])
         self.heading.pack(side="left", padx=(self.S(14), 0), pady=(self.S(10), 0))
         self.v_search = tk.StringVar()
@@ -577,17 +582,22 @@ class GuiApp:
         self.show_details(None)
 
     def _build_rail(self, parent) -> None:
-        """The thin bar on the left: library, refresh, settings; you and log out at the bottom."""
+        """The thin bar on the left: library, favorites, refresh, settings; you and log out at
+        the bottom."""
         rail = tk.Frame(parent, bg=THEME["rail"], width=self.S(60))
         rail.pack(side="left", fill="y")
         rail.pack_propagate(False)
-        icons = (("▦", "Library", lambda: self.set_filter(ALL_GAMES), True),
-                 ("⟳", "Refresh the library", self.load_library, False),
-                 ("⚙", "Settings", self.show_settings, False))
-        for i, (glyph, tip, command, active) in enumerate(icons):
+        icons = (("▦", "Library", lambda: self.show_view("library"), "library"),
+                 ("★", "Favorites", lambda: self.show_view("favorites"), "favorites"),
+                 ("⟳", "Refresh the library", self.load_library, None),
+                 ("⚙", "Settings", self.show_settings, None))
+        self.view_icons = {}
+        for i, (glyph, tip, command, view) in enumerate(icons):
             icon = self.rail_icon(rail, glyph, tip, command)
-            icon.set_active(active)
+            icon.set_active(view == self.view)
             icon.pack(pady=(self.S(18) if i == 0 else self.S(6), 0))
+            if view:
+                self.view_icons[view] = icon
         cfg = self.launcher.config
         if not self.launcher.uses_romm:
             where = f"without RomM · games in {roms_root(cfg)}"
@@ -782,7 +792,7 @@ class GuiApp:
         for w in self.chip_row.winfo_children():
             w.destroy()
         self.chips = {}
-        for key, text, count in library_filters(self.games, self.local_ids, show_local=self.launcher.uses_romm):
+        for key, text, count in library_filters(self.view_games(), self.local_ids, show_local=self.launcher.uses_romm):
             if key == ALL_GAMES:
                 name = "All"
             elif key == LOCAL_GAMES:
@@ -818,15 +828,31 @@ class GuiApp:
         self.refresh_chips()
         self.refresh_grid()
 
+    def show_view(self, view: str) -> None:
+        """The rail's Library (every game) or Favorites (only those, with the same search and chips)."""
+        self.view, self.filter_key = view, ALL_GAMES
+        for name, icon in self.view_icons.items():
+            icon.set_active(name == view)
+        self.title_label.config(text=VIEWS[view])
+        self.refresh_chips()
+        self.refresh_grid()
+
+    def view_games(self) -> list[Game]:
+        """The games of the page that's showing."""
+        if self.view == "favorites":
+            return [g for g in self.games if self.launcher.is_favorite(g)]
+        return self.games
+
     def refresh_grid(self, keep_scroll: bool = False) -> None:
         if not hasattr(self, "grid_frame"):
             return
         query = self.v_search.get()
-        shown = filter_library(self.games, self.filter_key, query, self.local_ids)
+        pool = self.view_games()
+        shown = filter_library(pool, self.filter_key, query, self.local_ids)
         if query.strip():
             self.heading.config(text=f"{len(shown)} found for “{query.strip()}”")
         else:
-            self.heading.config(text=f"{len(shown)} games" if self.games else "")
+            self.heading.config(text=f"{len(shown)} games" if pool else "")
         top = self.canvas.yview()[0] if keep_scroll else 0
         for w in self.grid_frame.winfo_children():
             w.destroy()
@@ -838,7 +864,9 @@ class GuiApp:
         if not shown:
             text = "Nothing matches your search." if query.strip() else (
                 "No games here yet." if self.games else "Loading…")
-            if not self.games and not self.launcher.uses_romm and not self.busy:
+            if self.games and not pool:
+                text = "No favorites yet. Select a game and click ☆ Favorite."
+            elif not self.games and not self.launcher.uses_romm and not self.busy:
                 folder = roms_root(self.launcher.config)
                 text = (f"No games yet. Put them in a folder per platform in {folder}\n"
                         f"({folder / 'n64'}, {folder / 'gba'}, …), or use + Add game.")
@@ -851,8 +879,10 @@ class GuiApp:
     def platform_color(self, slug: str) -> str:
         return PLATFORM_COLORS[sum(map(ord, slug)) % len(PLATFORM_COLORS)]
 
-    def _tile(self, key, name, platform, platform_name, image, status, status_color, selected, on_click, on_double):
-        """A cover in a fixed box with its platform in the corner, the name and a status line below."""
+    def _tile(self, key, name, platform, platform_name, image, status, status_color, selected, on_click, on_double,
+              favorite=False):
+        """A cover in a fixed box with its platform in the corner (and a star in the other
+        one for a favorite), the name and a status line below."""
         tile = tk.Frame(self.grid_frame, bg=THEME["bg"], cursor="hand2")
         ring = tk.Frame(tile, bg=THEME["accent"] if selected else THEME["bg"], padx=self.S(2), pady=self.S(2))
         ring.pack(anchor="w")
@@ -874,11 +904,18 @@ class GuiApp:
                        fg=THEME["text"], bg=THEME["rail"], padx=self.S(5), pady=0)
         tag.place(in_=cover, relx=1.0, x=-self.S(6), y=self.S(6), anchor="ne")
         tag.lift()
+        marks = [tag]
+        if favorite:
+            star = tk.Label(box, text="★", font=self.font(9, "bold"), fg=THEME["warn"], bg=THEME["rail"],
+                            padx=self.S(4), pady=0)
+            star.place(in_=cover, x=self.S(6), y=self.S(6), anchor="nw")
+            star.lift()
+            marks.append(star)
         title = self.label(tile, self.fit_text(name, self.font(10, "bold"), self.TILE_W), 10, "bold", anchor="w")
         title.pack(fill="x", padx=self.S(2), pady=(self.S(8), 0))
         line = self.label(tile, status, 9, fg=status_color, anchor="w")
         line.pack(fill="x", padx=self.S(2))
-        for w in (tile, ring, box, cover, tag, title, line):
+        for w in (tile, ring, box, cover, *marks, title, line):
             w.bind("<Button-1>", lambda e: on_click())
             if on_double:
                 w.bind("<Double-Button-1>", lambda e: on_double())
@@ -889,10 +926,15 @@ class GuiApp:
 
     def make_tile(self, game: Game):
         local = game.id in self.local_ids
+        line = "●  Installed" if local else "☁  In the cloud"
+        status = self.launcher.status(game)
+        if status:
+            line += f"  ·  ✓ {STATUS_NAMES[status]}"
         return self._tile(game.id, game.name, game.platform, game.platform_name, self.tile_images.get(game.id),
-                          "●  Installed" if local else "☁  In the cloud", THEME["ok"] if local else THEME["muted"],
+                          line, THEME["ok"] if local else THEME["muted"],
                           bool(self.selected and self.selected.id == game.id),
-                          lambda: self.select(game), lambda: self.play(game))
+                          lambda: self.select(game), lambda: self.play(game),
+                          favorite=self.launcher.is_favorite(game))
 
     def _inside(self, widget, event) -> bool:
         """Whether the pointer is still over widget or one of its children (Leave fires for those too)."""
@@ -1007,6 +1049,8 @@ class GuiApp:
                 b.pack(side="left", padx=(0, self.S(6)))
                 b.set_enabled(not self.busy)
 
+        self._marks(box, game)
+
         played = entry.get("last_played", "")
         if not self.launcher.uses_romm:
             save, color = "On this computer", THEME["text"]
@@ -1018,13 +1062,62 @@ class GuiApp:
             save, color = f"Synced {friendly_time(entry['synced_at']).lower()}", THEME["text"]
         else:
             save, color = "Not synced yet", THEME["muted"]
+        seconds = self.launcher.play_time(game)
         rows = [("Status", "Installed" if local else "In the cloud", THEME["ok"] if local else THEME["text"]),
                 ("Last played", friendly_time(played), THEME["text"]),
+                ("Played", fmt_duration(seconds) if seconds else "Not yet", THEME["text"] if seconds else THEME["muted"]),
                 ("Save", save, color)]
         rows += [(name, value, THEME["text"]) for name, value in game_facts(game.rom)]
         self._info_rows(box, rows)
         if game.rom.get("summary"):
             self._about(box, game.rom["summary"].strip())
+
+    def _marks(self, box, game: Game) -> None:
+        """☆ Favorite, and Finished / 100% (click the chosen one again to clear it)."""
+        self.label(box, "Your progress", 9, fg=THEME["muted"], anchor="w").pack(fill="x", pady=(self.S(18), self.S(6)))
+        row = tk.Frame(box, bg=THEME["panel"])
+        row.pack(anchor="w")
+        on = self.launcher.can_mark() and not self.busy
+        favorite = self.launcher.is_favorite(game)
+        chip = self.pill(row, "★  Favorite" if favorite else "☆  Favorite", lambda: self.mark_favorite(game, not favorite),
+                         kind="chip_on" if favorite else "chip", size=9, height=self.S(28))
+        chip.pack(side="left", padx=(0, self.S(6)))
+        chip.set_enabled(on)
+        self.mark_chips = {"favorite": chip}
+        status = self.launcher.status(game)
+        for key, text in STATUS_NAMES.items():
+            chip = self.pill(row, text, lambda k=key: self.mark_status(game, None if status == k else k),
+                             kind="chip_on" if status == key else "chip", size=9, height=self.S(28))
+            chip.pack(side="left", padx=(0, self.S(6)))
+            chip.set_enabled(on)
+            self.tooltip(chip, f"Mark it {text}" + (" (in RomM too)" if self.launcher.uses_romm else "")
+                         + ("; click again to clear" if status == key else ""))
+            self.mark_chips[key] = chip
+        if self.launcher.uses_romm and not self.launcher.client:
+            self.label(box, "Offline: these change once you're connected to RomM.", 8, fg=THEME["muted"],
+                       anchor="w").pack(fill="x", pady=(self.S(6), 0))
+
+    def mark_favorite(self, game: Game, on: bool) -> None:
+        self._mark_task(game, lambda: self.launcher.set_favorite(game, on))
+
+    def mark_status(self, game: Game, status: str | None) -> None:
+        self._mark_task(game, lambda: self.launcher.set_status(game, status))
+
+    def _mark_task(self, game: Game, work) -> None:
+        if self.busy:
+            return
+        self.busy = True
+        self.show_details(self.selected)
+
+        def done(result):
+            self.busy = False
+            if isinstance(result, BaseException):
+                self.log(f"Couldn't change {game.name}: {result}", "fail")
+            self.refresh_chips()
+            self.refresh_grid(keep_scroll=True)
+            self.show_details(self.selected)
+
+        self.run_task(work, done)
 
     def _layout_chips(self, choices) -> None:
         for w in self.layout_row.winfo_children():

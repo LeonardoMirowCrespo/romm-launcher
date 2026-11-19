@@ -11,11 +11,13 @@ order things depend on each other:
     config.py          config.json: defaults, per-system sections, migrations
     dualscreen.py      DS/3DS screen layouts and touch-screen controls
     core_downloads.py  downloading missing cores from libretro
-    romm.py            the RomM API client, with its safety lock (read, upload saves, add new ROMs)
+    romm.py            the RomM API client, with its safety lock (read, upload saves, add new ROMs,
+                       Finished / 100%, Favorites)
     saves.py           save files, 3DS save folders, backups, deciding which save is newer
     ports.py           PC ports that play a game instead of RetroArch: Ship of Harkinian, 2 Ship 2 Harkinian, sm64coopdx
     games.py           a game from the library: ROM and save locations, search, covers, facts
-    launcher.py        the launcher: login, library, play (download, sync, run, upload), add games
+    launcher.py        the launcher: login, library, play (download, sync, run, upload), add games,
+                       play time, Finished / 100%, favorites
     gui.py             the window (--gui)
     cli.py             the command line (main)
 """

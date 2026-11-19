@@ -49,7 +49,10 @@ ROMS = [
     {"id": 9, "name": "Pokemon Emerald", "fs_name": "Pokemon - Emerald (U).gba",
      "platform_fs_slug": "gba", "platform_display_name": "Game Boy Advance"},
 ]
-STORE = {"saves": [], "files": {}, "uploads": {}, "new_roms": {}}
+STORE = {"saves": [], "files": {}, "uploads": {}, "new_roms": {}, "props": [],
+         # someone else's favorites, and one of leo's that isn't for favorites
+         "collections": [{"id": 30, "name": "Favorites", "is_favorite": True, "rom_ids": [9], "owner_username": "anna"},
+                         {"id": 31, "name": "Zelda games", "is_favorite": False, "rom_ids": [7], "owner_username": "leo"}]}
 SUPPORTED = [("snes", "Super Nintendo Entertainment System"), ("nes", "Nintendo Entertainment System"),
              ("genesis", "Sega Mega Drive/Genesis"), ("psx", "Sony PlayStation"), ("n64", "Nintendo 64")]
 PLATFORMS = [{"id": 1, "fs_slug": "n64", "display_name": "Nintendo 64"},
@@ -128,6 +131,8 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, {"username": "leo"})
         if u.path == "/api/platforms":
             return self.send(200, PLATFORMS)
+        if u.path == "/api/collections":
+            return self.send(200, STORE["collections"])
         if u.path == "/api/platforms/supported":
             mine = {p["fs_slug"] for p in PLATFORMS}
             return self.send(200, PLATFORMS + [{"id": -1, "slug": slug, "fs_slug": slug, "name": name}
@@ -169,10 +174,31 @@ class H(BaseHTTPRequestHandler):
         SEEN["destructive"] += 1  # the launcher must never get here
         self.send(405, {"detail": "not allowed"})
 
-    do_DELETE = do_PATCH = refuse_write
+    do_PATCH = refuse_write
 
-    def do_PUT(self):  # only a chunk of a ROM upload that was started
+    def collection(self, path):
+        parts = path.split("/")  # /api/collections/<id>/roms
+        if len(parts) == 5 and parts[2] == "collections" and parts[4] == "roms" and parts[3].isdigit():
+            return next((c for c in STORE["collections"] if c["id"] == int(parts[3])), None)
+        return None
+
+    def do_DELETE(self):  # only taking a game out of a collection
         u = urlparse(self.path)
+        coll = self.collection(u.path)
+        if not (coll and self.authed()):
+            return self.refuse_write()
+        ids = json.loads(self.rfile.read(int(self.headers["Content-Length"])))["rom_ids"]
+        coll["rom_ids"] = [i for i in coll["rom_ids"] if i not in ids]
+        self.send(200, coll)
+
+    def do_PUT(self):  # a chunk of a ROM upload that was started, or a game's status
+        u = urlparse(self.path)
+        if u.path.startswith("/api/roms/") and u.path.endswith("/props") and self.authed():
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            STORE["props"].append(body)
+            rom = next(r for r in ROMS if r["id"] == int(u.path.split("/")[3]))
+            rom["rom_user"] = {**(rom.get("rom_user") or {"rating": 8}), **body}
+            return self.send(200, rom["rom_user"])
         upload = STORE["uploads"].get(u.path.rsplit("/", 1)[-1])
         if not (u.path.startswith("/api/roms/upload/") and upload and self.authed()):
             return self.refuse_write()
@@ -213,6 +239,19 @@ class H(BaseHTTPRequestHandler):
         if u.path.startswith("/api/roms/upload/") and u.path.endswith("/cancel"):
             SEEN["cancels"] += 1
             return self.send(204, b"", "text/plain")
+        if u.path == "/api/collections":
+            q = parse_qs(u.query)
+            msg = BytesParser(policy=HTTP).parsebytes(
+                b"Content-Type: " + self.headers["Content-Type"].encode() + b"\r\n\r\n" + raw)
+            name = [p.get_content() for p in msg.iter_parts()
+                    if p.get_param("name", header="content-disposition") == "name"][0]
+            STORE["collections"].append({"id": 40 + len(STORE["collections"]), "name": name, "rom_ids": [],
+                                         "is_favorite": q.get("is_favorite") == ["true"], "owner_username": "leo"})
+            return self.send(200, STORE["collections"][-1])
+        if self.collection(u.path):
+            coll = self.collection(u.path)
+            coll["rom_ids"] = sorted(set(coll["rom_ids"]) | set(json.loads(raw)["rom_ids"]))
+            return self.send(200, coll)
         if u.path == "/api/platforms":
             slug = json.loads(raw)["fs_slug"]
             name = dict(SUPPORTED)[slug]
@@ -309,6 +348,39 @@ blocked_body("platform with a path for a name refused", "POST", "/api/platforms"
 blocked_body("PUT outside an upload refused", "PUT", "/api/roms/upload/not-an-upload", b"x")
 blocked_body("POST /api/roms/delete still refused", "POST", "/api/roms/delete", json.dumps({"roms": [7]}).encode())
 blocked_body("PUT /api/roms/{id} still refused", "PUT", "/api/roms/7", b"{}")
+blocked_body("status: other fields with it refused", "PUT", "/api/roms/7/props",
+             json.dumps({"status": "finished", "rating": 10}).encode())
+blocked_body("status: RomM's other statuses refused", "PUT", "/api/roms/7/props", json.dumps({"status": "retired"}).encode())
+blocked_body("status: hiding a game refused", "PUT", "/api/roms/7/props", json.dumps({"hidden": True}).encode())
+blocked("status: last-played options refused", "PUT", "/api/roms/7/props", {"remove_last_played": "true"})
+blocked_body("collections: before Favorites is known, refused", "POST", "/api/collections/31/roms",
+             json.dumps({"rom_ids": [8]}).encode())
+blocked_body("collections: deleting one refused", "DELETE", "/api/collections/31", b"")
+blocked_body("collections: changing one refused", "PUT", "/api/collections/31", b"{}")
+form = romm._favorites_form("0" * 32)
+
+
+def blocked_form(name, params, body):
+    try:
+        c._request("POST", "/api/collections", params=params, body=body,
+                   content_type=f"multipart/form-data; boundary={'0' * 32}")
+    except romm.RommError as e:
+        return check(name, str(e).startswith("Blocked"))
+    raise SystemExit(f"FAILED: {name} (request was sent)")
+
+
+blocked_form("collections: a public one refused", {"is_favorite": "true", "is_public": "true"}, form)
+blocked_form("collections: one that isn't Favorites refused", {"is_favorite": "false"}, form)
+blocked_form("collections: another name refused", {"is_favorite": "true"}, form.replace(b"Favorites", b"Stuff"))
+blocked_form("collections: a cover with it refused", {"is_favorite": "true"},
+             form.replace(b"--\r\n", b'\r\nContent-Disposition: form-data; name="url_cover"\r\n\r\nhttp://x\r\n--'
+                          + b"0" * 32 + b"--\r\n"))
+c.favorites_id = 40
+blocked_body("collections: only the Favorites one", "POST", "/api/collections/31/roms", json.dumps({"rom_ids": [8]}).encode())
+blocked_body("collections: one game at a time", "DELETE", "/api/collections/40/roms", json.dumps({"rom_ids": [7, 8]}).encode())
+blocked_body("collections: nothing else in the body", "DELETE", "/api/collections/40/roms",
+             json.dumps({"rom_ids": [7], "name": "x"}).encode())
+c.favorites_id = None
 check("redirect within RomM followed", c._json("GET", "/redirect-home")["username"] == "leo")
 check("nothing destructive reached the server", SEEN["destructive"] == 0)
 sub = romm.RommClient("https://romm.example.com/romm/", "a", "b")
@@ -447,6 +519,50 @@ check("new save uploaded on close", "Save uploaded to RomM." in log
       and saves.fetch_remote(c, sm64, saves.FileSave(sm64_save)).data == b"M" * 512
       and app.state["8"]["hash"] == util.sha256(b"M" * 512))
 sm64.rom_dest.unlink()  # later tests expect only Ocarina of Time on this computer
+check("play time counted and shown when the game closes", "play_seconds" in app.state["8"]
+      and "Played 0 min" in log)
+app.add_play_time(sm64, 3725)
+check("play time adds up", app.play_time(sm64) == 3725 + 0 and util.fmt_duration(app.play_time(sm64)) == "1 h 2 min")
+check("play time format", [util.fmt_duration(t) for t in (0, 59, 2520, 7200, 400000)]
+      == ["0 min", "0 min", "42 min", "2 h", "111 h"])
+
+# Finished / 100% and favorites live in RomM (its web UI shows the same).
+with contextlib.redirect_stdout(io.StringIO()):
+    check("status: Finished set in RomM", app.set_status(oot, "finished") and STORE["props"][-1] == {"status": "finished"}
+          and ROMS[0]["rom_user"] == {"rating": 8, "status": "finished"} and app.status(oot) == "finished")
+    cached = {r["id"]: r for r in util.load_json(paths.LIBRARY_CACHE, {})["roms"]}
+    check("status: kept in the offline library", cached[7]["rom_user"]["status"] == "finished")
+    app.set_status(oot, "completed_100")
+    check("status: 100%", app.status(oot) == "completed_100" and "✓ 100%" in app.game_marks(oot))
+    app.set_status(oot, None)
+    check("status: cleared (only the status; RomM keeps the rest)", STORE["props"][-1] == {"status": None}
+          and app.status(oot) is None and ROMS[0]["rom_user"]["rating"] == 8)
+    ROMS[1]["rom_user"] = {"status": "retired"}
+    check("status: RomM's others count as none", app.status(games.Game(ROMS[1], app.config)) is None)
+    del ROMS[1]["rom_user"]
+    check("favorites: someone else's Favorites aren't yours", c.favorites() == set() and c.favorites_id is None)
+    check("favorites: the first one makes RomM's Favorites collection", app.set_favorite(oot, True)
+          and STORE["collections"][-1]["name"] == "Favorites" and STORE["collections"][-1]["is_favorite"]
+          and STORE["collections"][-1]["rom_ids"] == [7] and app.is_favorite(oot))
+    n_collections = len(STORE["collections"])
+    app.set_favorite(sm64, True)
+    check("favorites: then added to it", len(STORE["collections"]) == n_collections
+          and STORE["collections"][-1]["rom_ids"] == [7, 8] and "★" in app.game_marks(sm64))
+    app.set_favorite(oot, False)
+    check("favorites: taken out again (the game stays)", STORE["collections"][-1]["rom_ids"] == [8]
+          and not app.is_favorite(oot) and len(ROMS) == 3 and STORE["collections"][1]["rom_ids"] == [7])
+    check("favorites: kept in the offline library", util.load_json(paths.LIBRARY_CACHE, {})["favorites"] == [8])
+    again = launcher.Launcher()
+    again.client = c
+    reloaded = {g.id: g for g in again.library()}
+    check("favorites: read from RomM with the library", again.favorites == {8} and again.is_favorite(reloaded[8]))
+    away = launcher.Launcher()
+    away.offline = True
+    away.library()
+    n_props = len(STORE["props"])
+    check("offline: favorites from the cache, changes refused", away.favorites == {8}
+          and away.set_status(oot, "finished") is False and away.set_favorite(oot, True) is False
+          and len(STORE["props"]) == n_props)
 
 # ---- Ship of Harkinian (a PC port of Ocarina of Time) ---------------------------
 oot3d = games.Game({"id": 50, "name": "The Legend of Zelda: Ocarina of Time 3D", "fs_name": "oot3d.3ds",
@@ -1520,6 +1636,22 @@ if window:
     check("a failure opens the activity log", window.activity_open)
     window.select(oot)
     check("online: the Add game button is there", window.add_button.text.endswith("Add game"))
+    window.show_view("favorites")
+    check("favorites page: only favorites, its own title", list(window.tiles) == [8]
+          and window.title_label.cget("text") == "Favorites" and window.view_icons["favorites"].active
+          and not window.view_icons["library"].active)
+    window.select(next(g for g in window.games if g.id == 7))
+    window.mark_chips["favorite"].invoke()
+    check("favorites page: ☆ Favorite adds the game", pump(lambda: not window.busy and sorted(window.tiles) == [7, 8])
+          and window.mark_chips["favorite"].text.startswith("★"))
+    window.mark_chips["finished"].invoke()
+    check("Finished chip marks it in RomM", pump(lambda: not window.busy and ROMS[0]["rom_user"]["status"] == "finished"))
+    window.mark_chips["finished"].invoke()  # again: clears it
+    check("Finished chip again clears it", pump(lambda: not window.busy and ROMS[0]["rom_user"]["status"] is None))
+    window.mark_chips["favorite"].invoke()
+    check("favorites page: ★ Favorite takes it out", pump(lambda: not window.busy and list(window.tiles) == [8]))
+    window.show_view("library")
+    check("library page: every game again", len(window.tiles) == 3 and window.title_label.cget("text") == "Library")
 
     def pick_from_list():
         text, listbox, shown, finish = window.list_dialog
@@ -1691,6 +1823,14 @@ with contextlib.redirect_stdout(out):
 subprocess.Popen = real_popen
 entry = loc.state[str(mario.id)]
 check("local: game started", launched[-1][-1] == str(lroms / "n64" / "Mario.z64"))
+with contextlib.redirect_stdout(io.StringIO()):
+    check("local: status and favorites kept on this computer", loc.set_status(mario, "completed_100")
+          and loc.set_favorite(mario, True) and loc.status(mario) == "completed_100" and loc.is_favorite(mario)
+          and util.load_json(paths.STATE_FILE, {})[str(mario.id)]["favorite"] is True
+          and "play_seconds" in loc.state[str(mario.id)])
+    loc.set_status(mario, None)
+    loc.set_favorite(mario, False)
+    check("local: and cleared", loc.status(mario) is None and not loc.is_favorite(mario))
 check("local: save stays, nothing pending", mario_save.read_bytes() == b"L" * 512
       and "saved on this computer" in out.getvalue() and not entry.get("pending_upload") and "hash" not in entry
       and entry.get("last_played"))

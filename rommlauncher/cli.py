@@ -42,6 +42,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--add", nargs="+", metavar="FILE", type=Path,
                         help="add game files you own (your own cartridge dumps, homebrew) to RomM, "
                              "or to the ROM folder without RomM")
+    parser.add_argument("--status", choices=("finished", "100", "none"),
+                        help="mark a game Finished or 100%% (in RomM, so its web UI shows it too), "
+                             "or neither, instead of playing it")
+    mark = parser.add_mutually_exclusive_group()
+    mark.add_argument("--favorite", action="store_true", help="add a game to your favorites instead of playing it")
+    mark.add_argument("--unfavorite", action="store_true", help="take a game out of your favorites")
     parser.add_argument("--gui", action="store_true", help="open the launcher in a window instead of the terminal")
     parser.add_argument("--setup", action="store_true",
                         help="choose RomM or no RomM, change the RomM address and login, RetroArch paths and the PC ports")
@@ -118,6 +124,14 @@ def main(argv: list[str] | None = None) -> int:
         game = app.pick_game(games, query)
         if not game:
             return 0
+        if args.status or args.favorite or args.unfavorite:
+            done = True
+            if args.status:
+                done = app.set_status(game, {"finished": "finished", "100": "completed_100"}.get(args.status))
+            if args.favorite or args.unfavorite:
+                done = app.set_favorite(game, args.favorite) and done
+            print()
+            return 0 if done else 1
         if args.upload:
             if not app.uses_romm:
                 app.upload_now(game)  # says why not
